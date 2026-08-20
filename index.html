@@ -292,9 +292,11 @@
 
   const FIELD_DEFS = [
     ['name','Name'],['surname','Surname'],['dob','Date of Birth'],
-    ['email','Email'],['phone','Phone'],['state','State'],['age','Age']
+    ['email','Email'],['phone','Phone'],['state','State'],['age','Age'],['ctc','CTC / Income']
   ];
   const NG_STATES = ["Abia","Adamawa","Akwa Ibom","Anambra","Bauchi","Bayelsa","Benue","Borno","Cross River","Delta","Ebonyi","Edo","Ekiti","Enugu","Gombe","Imo","Jigawa","Kaduna","Kano","Katsina","Kebbi","Kogi","Kwara","Lagos","Nasarawa","Niger","Ogun","Ondo","Osun","Oyo","Plateau","Rivers","Sokoto","Taraba","Yobe","Zamfara","FCT","Abuja"];
+  const US_STATES = ["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"];
+  const ALL_STATES = NG_STATES.concat(US_STATES);
 
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,9); }
   function esc(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -470,36 +472,64 @@
       }
     }
     if(!fields.state){
-      for(const s of NG_STATES){
+      for(const s of ALL_STATES){
         if(new RegExp('\\b'+s.replace(/\s/g,'\\s+')+'\\b','i').test(text)){ fields.state=s; break; }
       }
     }
     return fields;
   }
+  // Pulls a known state name out of a longer answer (e.g. a full address string like
+  // "Bladensburg, Maryland" or "12 Ikorodu Rd, Lagos") — used when the question is phrased
+  // as "what's your address" rather than "what state".
+  function extractStateFromText(text){
+    for(const s of ALL_STATES){
+      if(new RegExp('\\b'+s.replace(/\s/g,'\\s+')+'\\b','i').test(text)) return s;
+    }
+    return null;
+  }
 
-  // Question phrasing we recognize, per field. Matched against each OCR "line" of text.
+  // Question phrasing we recognize, per field. Matched against one OCR "line" or a short
+  // run of consecutive lines joined together (since longer questions wrap across 2-3 lines
+  // on a phone screenshot, e.g. "Q9. What actions do you take when flooding is\nexpected?").
   const QUESTION_PATTERNS = {
     name: [/what.{0,15}your (full |first )?name/i, /\bfull\s*name\b/i, /\byour name\b/i, /^name\s*\??$/i],
     surname: [/\bsurname\b/i, /\blast\s*name\b/i, /\bfamily\s*name\b/i],
-    age: [/how old are you/i, /\byour age\b/i, /\bage range\b/i, /^age\s*\??$/i, /^what is your age/i],
+    age: [/how old are you/i, /\byour age\b/i, /\bage range\b/i, /^age\s*\??$/i, /what is your age/i],
     dob: [/date of birth/i, /\bdob\b/i, /when were you born/i],
-    email: [/email\s*(address)?/i],
+    email: [/e[\-\s]?mail\s*(address)?[:\s]?$/i, /provide your email/i, /what.{0,10}your email/i],
     phone: [/phone\s*(number)?/i, /\bmobile\b/i, /\bwhatsapp number\b/i],
-    state: [/which state/i, /state (do you|you) (reside|live)/i, /^state( of residence)?\s*\??$/i, /state of origin/i],
-    ctc: [/\bctc\b/i, /take.home/i, /monthly (salary|income)/i, /annual (salary|income)/i, /\bsalary\b/i, /compensation/i],
+    state: [/which state/i, /state (do you|you) (reside|live)/i, /^state( of residence)?\s*\??$/i, /state of origin/i, /what is your address/i, /house number.{0,20}state/i],
+    ctc: [/\bctc\b/i, /take.home/i, /household income/i, /monthly (salary|income)/i, /annual (salary|income)/i, /\bsalary\b/i, /compensation/i],
   };
-  // Lines that are themselves questions (any field) — used as stop-markers so we don't
-  // read an answer that has drifted into the next question.
-  function isQuestionLine(text){
+  // Any numbered question ("Q19.", "Q1a.") is a question boundary even if it's not one of
+  // our tracked fields — used so we never let an answer for one question run into the next.
+  const Q_NUMBER_RE = /^Q\s*[\dlI]+[a-z]?[.\)]/i;
+  function matchQuestionKey(text){
     for(const key in QUESTION_PATTERNS){
       if(QUESTION_PATTERNS[key].some(re=>re.test(text))) return key;
     }
-    if(/\?\s*$/.test(text.trim())) return '?';
+    return null;
+  }
+  // Tests a line, and if nothing matches, tries it joined with the next 1-2 lines (for
+  // questions that wrap) — returns {key, span} where span is how many lines the question
+  // itself occupies, so the caller knows where the answer search should start.
+  function isQuestionAt(i, lines){
+    const t0 = lines[i].text.trim();
+    let key = matchQuestionKey(t0);
+    if(key) return { key, span:1, isQNum:Q_NUMBER_RE.test(t0) };
+    for(let span=2; span<=3 && i+span-1<lines.length; span++){
+      const last = lines[i+span-1];
+      if(last.y0 - lines[i+span-2].y1 > lines[i].h*1.8) break; // gap too big, not a wrapped question
+      const joined = lines.slice(i, i+span).map(l=>l.text.trim()).join(' ');
+      key = matchQuestionKey(joined);
+      if(key) return { key, span, isQNum:Q_NUMBER_RE.test(t0) };
+    }
+    if(Q_NUMBER_RE.test(t0) || /\?\s*$/.test(t0)) return { key:'?', span:1, isQNum:true };
     return null;
   }
   // Text that's clearly UI chrome, not an answer — skip these when hunting for an answer line.
   function looksLikeChrome(text){
-    return /^(continue|next|submit|back|skip|select one|choose an option|required|optional|tap to select)$/i.test(text.trim());
+    return /^(continue|next|submit|back|skip|select one|choose an option|required|optional|tap to select|\(select all that apply\))$/i.test(text.trim());
   }
 
   // Groups OCR words into left-to-right, top-to-bottom text lines using their bounding
@@ -528,67 +558,84 @@
     return lines;
   }
 
-  // Samples the average pixel color behind a line's bounding box (plus a little left-margin,
-  // where a radio dot / checkbox / pill fill usually sits) so we can spot which option in a
-  // multiple-choice question is visually highlighted/selected vs. the plain unselected ones.
-  function sampleLineColor(ctx, line, canvasW, canvasH){
-    const pad = Math.max(6, (line.y1-line.y0)*0.4);
-    const x0 = Math.max(0, Math.round(line.x0 - pad*2));
-    const y0 = Math.max(0, Math.round(line.y0 - pad));
-    const x1 = Math.min(canvasW, Math.round(line.x1 + pad));
-    const y1 = Math.min(canvasH, Math.round(line.y1 + pad));
-    const w = Math.max(1, x1-x0), h = Math.max(1, y1-y0);
+  // Samples the small icon swatch just to the LEFT of an option line's text — this is where
+  // a radio dot / checkbox lives in most survey UIs (Qualtrics, Google Forms, Typeform...).
+  // We sample there specifically, not the whole row, because the row's background is often
+  // just alternating zebra-striping unrelated to whether the option is selected — the actual
+  // selected/unselected signal is almost always in that small icon, not the row fill.
+  function sampleIconColor(ctx, line, canvasW, canvasH){
+    const iconH = line.y1-line.y0;
+    const gap = iconH*0.5;
+    const x1 = line.x0 - gap;
+    const x0 = x1 - iconH*1.5;
+    const y0 = line.y0 - iconH*0.15;
+    const y1 = line.y1 + iconH*0.15;
+    const rx0 = Math.max(0, Math.round(x0)), ry0 = Math.max(0, Math.round(y0));
+    const rx1 = Math.min(canvasW, Math.round(x1)), ry1 = Math.min(canvasH, Math.round(y1));
+    const w = Math.max(1, rx1-rx0), h = Math.max(1, ry1-ry0);
     let data;
-    try{ data = ctx.getImageData(x0, y0, w, h).data; } catch(e){ return null; }
+    try{ data = ctx.getImageData(rx0, ry0, w, h).data; } catch(e){ return null; }
     let r=0,g=0,b=0,n=0;
-    for(let i=0;i<data.length;i+=4*7){ r+=data[i]; g+=data[i+1]; b+=data[i+2]; n++; }
+    for(let i=0;i<data.length;i+=4){ r+=data[i]; g+=data[i+1]; b+=data[i+2]; n++; }
     if(!n) return null;
     return { r:r/n, g:g/n, b:b/n };
   }
   function colorDist(a,b){ return Math.sqrt((a.r-b.r)**2 + (a.g-b.g)**2 + (a.b-b.b)**2); }
 
-  // Given the question line's index and the full line list, collect the option/answer
+  // Given the question's index+span and the full line list, collect the option/answer
   // lines that follow (typed answer, or a run of selectable options), stopping at the next
-  // question. If it looks like a multiple-choice group, use color sampling on the *original*
-  // (un-preprocessed) screenshot to guess which option is actually selected.
-  function findAnswerForQuestion(qIndex, lines, ctx, canvasW, canvasH){
+  // question. If it looks like a multiple-choice group, sample the icon swatch of each
+  // option on the *original* (un-preprocessed) screenshot to find the selected one(s) —
+  // an option's icon is far more saturated/colored when filled-in/checked than when empty.
+  function findAnswerForQuestion(qIndex, qSpan, lines, ctx, canvasW, canvasH){
     const candidates = [];
-    for(let i=qIndex+1; i<lines.length && i<=qIndex+10; i++){
+    const start = qIndex+qSpan;
+    for(let i=start; i<lines.length && i<start+14; i++){
       const t = lines[i].text.trim();
       if(!t) continue;
-      if(isQuestionLine(t)) break;
+      const q = isQuestionAt(i, lines);
+      if(q) break;
       if(looksLikeChrome(t)) continue;
       candidates.push(lines[i]);
-      if(candidates.length>=8) break;
+      if(candidates.length>=10) break;
     }
     if(!candidates.length) return null;
     if(candidates.length===1) return candidates[0].text;
 
-    // Multiple short candidate lines close together in size = likely a choice list (chips,
-    // radio rows, a range picker). Try to pick the highlighted one by color.
-    const shortish = candidates.every(c=>c.text.length<=28);
-    if(shortish && ctx){
-      const colors = candidates.map(c=>sampleLineColor(ctx, c, canvasW, canvasH)).filter(Boolean);
-      if(colors.length===candidates.length){
+    // Multiple short candidate lines close together = likely a choice list (radio/checkbox
+    // rows, chips, a range picker). Try to pick the checked one(s) via the icon swatch.
+    const shortish = candidates.filter(c=>c.text.length<=40);
+    if(shortish.length===candidates.length && ctx){
+      const colors = candidates.map(c=>sampleIconColor(ctx, c, canvasW, canvasH));
+      if(colors.every(Boolean)){
         const avg = { r:colors.reduce((s,c)=>s+c.r,0)/colors.length, g:colors.reduce((s,c)=>s+c.g,0)/colors.length, b:colors.reduce((s,c)=>s+c.b,0)/colors.length };
-        let best=-1, bestDist=0;
-        colors.forEach((c,i)=>{ const d=colorDist(c,avg); if(d>bestDist){ bestDist=d; best=i; } });
-        // Only trust this if the outlier is clearly distinct from the pack (real highlight),
-        // not just JPEG noise — otherwise fall through to "first line" as a safer guess.
-        if(bestDist>18) return candidates[best].text;
+        const dists = colors.map(c=>colorDist(c,avg));
+        const maxDist = Math.max(...dists);
+        // Real selected icons (colored fill) stand out sharply from empty gray/white ones —
+        // require a solid absolute gap so we don't guess on a flat, all-unselected question.
+        if(maxDist>35){
+          const picked = candidates.filter((c,i)=>dists[i] > Math.max(35, maxDist*0.55));
+          if(picked.length) return picked.map(c=>c.text).join(', ');
+        }
       }
-      return candidates[0].text;
     }
-    return candidates[0].text;
+    // Couldn't confidently detect a selection (e.g. flat/no accent color, or nothing checked
+    // yet) — don't guess an option at random; fall back to treating it as a typed answer only
+    // if there's just one non-option-looking (longer) candidate, otherwise leave it blank.
+    return null;
   }
 
   function extractFieldsFromLayout(lines, ctx, canvasW, canvasH){
     const fields = {};
     for(let i=0;i<lines.length;i++){
-      const key = isQuestionLine(lines[i].text);
-      if(!key || key==='?' || fields[key]) continue;
-      const answer = findAnswerForQuestion(i, lines, ctx, canvasW, canvasH);
-      if(answer) fields[key] = answer.replace(/\s+/g,' ').trim();
+      const q = isQuestionAt(i, lines);
+      if(!q || q.key==='?' || fields[q.key]) continue;
+      let answer = findAnswerForQuestion(i, q.span, lines, ctx, canvasW, canvasH);
+      if(answer && q.key==='state'){
+        const stateOnly = extractStateFromText(answer);
+        if(stateOnly) answer = stateOnly;
+      }
+      if(answer) fields[q.key] = answer.replace(/\s+/g,' ').trim();
     }
     return fields;
   }
