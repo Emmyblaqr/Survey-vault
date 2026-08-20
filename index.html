@@ -212,9 +212,14 @@
     background:linear-gradient(180deg, rgba(0,0,0,0.8), transparent);position:absolute;top:0;left:0;right:0;z-index:2;
   }
   .full-view .fv-top button{background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;padding:8px 10px;font-size:14px;}
-  .fv-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;position:relative;}
-  .fv-imgwrap{position:relative;max-width:100%;}
-  .fv-imgwrap img{max-width:100%;max-height:85vh;display:block;}
+  .fv-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;touch-action:none;}
+  .fv-imgwrap{position:relative;max-width:100%;transform-origin:center center;transition:transform .05s linear;will-change:transform;}
+  .fv-imgwrap img{max-width:100%;max-height:85vh;display:block;pointer-events:none;user-select:none;-webkit-user-drag:none;}
+  .fv-zoom-controls{display:flex;gap:6px;}
+  .fv-zoom-controls button{
+    background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;
+    width:34px;height:34px;font-size:16px;line-height:1;
+  }
   .hl-box{position:absolute;border:2px solid #ffd600;background:rgba(255,214,0,0.32);border-radius:2px;}
   .fv-status{
     position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
@@ -269,6 +274,21 @@
   let nav = { view:'home', surveyId:null, characterId:null, imageId:null, highlightQ:null };
   let searchQuery = '';
   let toastTimer = null;
+
+  // ---------- navigation / hardware back button ----------
+  // Every screen change pushes browser history, so the device back button / edge-swipe
+  // gesture (and the desktop back arrow) steps back through the app instead of leaving it.
+  function go(newNav){
+    nav = newNav;
+    searchQuery = '';
+    try{ history.pushState({ nav: JSON.parse(JSON.stringify(nav)) }, ''); }catch(e){}
+    render();
+  }
+  window.addEventListener('popstate', (e)=>{
+    nav = (e.state && e.state.nav) || { view:'home', surveyId:null, characterId:null, imageId:null, highlightQ:null };
+    searchQuery = '';
+    render();
+  });
 
   const FIELD_DEFS = [
     ['name','Name'],['surname','Surname'],['dob','Date of Birth'],
@@ -413,6 +433,8 @@
   }
 
   // ---------- field extraction ----------
+  // Regex fallback: catches explicitly labeled fields like "Name: John" or a bare
+  // email/phone/date anywhere in the blob. Used to fill in anything the layout pass misses.
   function extractFields(text){
     const fields = {};
     let m;
@@ -429,6 +451,9 @@
 
     m = text.match(/\bAge[:\s]+(\d{1,3})\b/i) || text.match(/\b(\d{1,2})\s*(?:years old|yrs old|yrs)\b/i);
     if(m) fields.age = m[1];
+
+    m = text.match(/\bC\.?T\.?C\.?[:\s]+([^\n]{2,30})/i) || text.match(/\btake.home[:\s]+([^\n]{2,30})/i);
+    if(m) fields.ctc = m[1].trim();
 
     const lines = text.split(/\n+/);
     const labelMap = {
@@ -452,30 +477,216 @@
     return fields;
   }
 
+  // Question phrasing we recognize, per field. Matched against each OCR "line" of text.
+  const QUESTION_PATTERNS = {
+    name: [/what.{0,15}your (full |first )?name/i, /\bfull\s*name\b/i, /\byour name\b/i, /^name\s*\??$/i],
+    surname: [/\bsurname\b/i, /\blast\s*name\b/i, /\bfamily\s*name\b/i],
+    age: [/how old are you/i, /\byour age\b/i, /\bage range\b/i, /^age\s*\??$/i, /^what is your age/i],
+    dob: [/date of birth/i, /\bdob\b/i, /when were you born/i],
+    email: [/email\s*(address)?/i],
+    phone: [/phone\s*(number)?/i, /\bmobile\b/i, /\bwhatsapp number\b/i],
+    state: [/which state/i, /state (do you|you) (reside|live)/i, /^state( of residence)?\s*\??$/i, /state of origin/i],
+    ctc: [/\bctc\b/i, /take.home/i, /monthly (salary|income)/i, /annual (salary|income)/i, /\bsalary\b/i, /compensation/i],
+  };
+  // Lines that are themselves questions (any field) — used as stop-markers so we don't
+  // read an answer that has drifted into the next question.
+  function isQuestionLine(text){
+    for(const key in QUESTION_PATTERNS){
+      if(QUESTION_PATTERNS[key].some(re=>re.test(text))) return key;
+    }
+    if(/\?\s*$/.test(text.trim())) return '?';
+    return null;
+  }
+  // Text that's clearly UI chrome, not an answer — skip these when hunting for an answer line.
+  function looksLikeChrome(text){
+    return /^(continue|next|submit|back|skip|select one|choose an option|required|optional|tap to select)$/i.test(text.trim());
+  }
+
+  // Groups OCR words into left-to-right, top-to-bottom text lines using their bounding
+  // boxes, since Tesseract's raw text can merge/split lines in ways that don't match what's
+  // actually on screen (multi-column forms, chip/pill option rows, etc.).
+  function clusterWordsIntoLines(words){
+    if(!words || !words.length) return [];
+    const sorted = words.slice().sort((a,b)=> (a.y0+a.y1)/2 - (b.y0+b.y1)/2);
+    const lines = [];
+    for(const w of sorted){
+      const wc = (w.y0+w.y1)/2;
+      const wh = w.y1-w.y0;
+      let line = lines.find(l => Math.abs(l.yc - wc) < Math.max(wh, l.h)*0.55);
+      if(!line){ line = { yc:wc, h:wh, y0:w.y0, y1:w.y1, words:[] }; lines.push(line); }
+      line.words.push(w);
+      line.y0 = Math.min(line.y0, w.y0); line.y1 = Math.max(line.y1, w.y1);
+      line.yc = (line.y0+line.y1)/2; line.h = line.y1-line.y0;
+    }
+    lines.forEach(l=>{
+      l.words.sort((a,b)=>a.x0-b.x0);
+      l.x0 = Math.min(...l.words.map(w=>w.x0));
+      l.x1 = Math.max(...l.words.map(w=>w.x1));
+      l.text = l.words.map(w=>w.t).join(' ').trim();
+    });
+    lines.sort((a,b)=>a.y0-b.y0);
+    return lines;
+  }
+
+  // Samples the average pixel color behind a line's bounding box (plus a little left-margin,
+  // where a radio dot / checkbox / pill fill usually sits) so we can spot which option in a
+  // multiple-choice question is visually highlighted/selected vs. the plain unselected ones.
+  function sampleLineColor(ctx, line, canvasW, canvasH){
+    const pad = Math.max(6, (line.y1-line.y0)*0.4);
+    const x0 = Math.max(0, Math.round(line.x0 - pad*2));
+    const y0 = Math.max(0, Math.round(line.y0 - pad));
+    const x1 = Math.min(canvasW, Math.round(line.x1 + pad));
+    const y1 = Math.min(canvasH, Math.round(line.y1 + pad));
+    const w = Math.max(1, x1-x0), h = Math.max(1, y1-y0);
+    let data;
+    try{ data = ctx.getImageData(x0, y0, w, h).data; } catch(e){ return null; }
+    let r=0,g=0,b=0,n=0;
+    for(let i=0;i<data.length;i+=4*7){ r+=data[i]; g+=data[i+1]; b+=data[i+2]; n++; }
+    if(!n) return null;
+    return { r:r/n, g:g/n, b:b/n };
+  }
+  function colorDist(a,b){ return Math.sqrt((a.r-b.r)**2 + (a.g-b.g)**2 + (a.b-b.b)**2); }
+
+  // Given the question line's index and the full line list, collect the option/answer
+  // lines that follow (typed answer, or a run of selectable options), stopping at the next
+  // question. If it looks like a multiple-choice group, use color sampling on the *original*
+  // (un-preprocessed) screenshot to guess which option is actually selected.
+  function findAnswerForQuestion(qIndex, lines, ctx, canvasW, canvasH){
+    const candidates = [];
+    for(let i=qIndex+1; i<lines.length && i<=qIndex+10; i++){
+      const t = lines[i].text.trim();
+      if(!t) continue;
+      if(isQuestionLine(t)) break;
+      if(looksLikeChrome(t)) continue;
+      candidates.push(lines[i]);
+      if(candidates.length>=8) break;
+    }
+    if(!candidates.length) return null;
+    if(candidates.length===1) return candidates[0].text;
+
+    // Multiple short candidate lines close together in size = likely a choice list (chips,
+    // radio rows, a range picker). Try to pick the highlighted one by color.
+    const shortish = candidates.every(c=>c.text.length<=28);
+    if(shortish && ctx){
+      const colors = candidates.map(c=>sampleLineColor(ctx, c, canvasW, canvasH)).filter(Boolean);
+      if(colors.length===candidates.length){
+        const avg = { r:colors.reduce((s,c)=>s+c.r,0)/colors.length, g:colors.reduce((s,c)=>s+c.g,0)/colors.length, b:colors.reduce((s,c)=>s+c.b,0)/colors.length };
+        let best=-1, bestDist=0;
+        colors.forEach((c,i)=>{ const d=colorDist(c,avg); if(d>bestDist){ bestDist=d; best=i; } });
+        // Only trust this if the outlier is clearly distinct from the pack (real highlight),
+        // not just JPEG noise — otherwise fall through to "first line" as a safer guess.
+        if(bestDist>18) return candidates[best].text;
+      }
+      return candidates[0].text;
+    }
+    return candidates[0].text;
+  }
+
+  function extractFieldsFromLayout(lines, ctx, canvasW, canvasH){
+    const fields = {};
+    for(let i=0;i<lines.length;i++){
+      const key = isQuestionLine(lines[i].text);
+      if(!key || key==='?' || fields[key]) continue;
+      const answer = findAnswerForQuestion(i, lines, ctx, canvasW, canvasH);
+      if(answer) fields[key] = answer.replace(/\s+/g,' ').trim();
+    }
+    return fields;
+  }
+
   function mergeFieldsIntoCharacter(charId){
     const ch = state.characters[charId];
     if(!ch) return;
-    const imgIds = Object.values(state.imagesMeta).filter(im=>im.characterId===charId).map(im=>im.id);
-    const combined = imgIds.map(id=>state.imagesMeta[id].ocrText||'').join('\n');
-    const extracted = extractFields(combined);
+    const imgs = Object.values(state.imagesMeta).filter(im=>im.characterId===charId);
     ch.fields = ch.fields || {};
     let changed = false;
-    for(const k in extracted){
-      if(!ch.fields[k]){ ch.fields[k] = extracted[k]; changed = true; }
+    // Layout-based (question → answer) extraction per-image first — it's more accurate —
+    // then a whole-text regex pass as a fallback for anything still missing.
+    for(const im of imgs){
+      const extracted = im.layoutFields || {};
+      for(const k in extracted){
+        if(!ch.fields[k]){ ch.fields[k] = extracted[k]; changed = true; }
+      }
+    }
+    const combined = imgs.map(im=>im.ocrText||'').join('\n');
+    const fallback = extractFields(combined);
+    for(const k in fallback){
+      if(!ch.fields[k]){ ch.fields[k] = fallback[k]; changed = true; }
     }
     if(changed) storeSet('character:'+charId, ch);
   }
 
   // ---------- OCR ----------
+  // Loads a dataURL into a canvas, upscales small screenshots and boosts contrast to a
+  // clean grayscale — this is the single biggest lever for OCR accuracy on UI screenshots
+  // (small text, low-contrast theme colors, anti-aliased fonts all trip Tesseract up).
+  function preprocessForOCR(dataUrl){
+    return new Promise((resolve)=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const targetW = img.width < 1400 ? 1400 : Math.min(img.width, 2400);
+        const scale = targetW / img.width;
+        const w = Math.round(img.width*scale), h = Math.round(img.height*scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const imgData = ctx.getImageData(0,0,w,h);
+        const d = imgData.data;
+        // grayscale + simple min/max contrast stretch
+        let min=255, max=0;
+        const gray = new Uint8ClampedArray(w*h);
+        for(let i=0, p=0; i<d.length; i+=4, p++){
+          const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+          gray[p]=g; if(g<min)min=g; if(g>max)max=g;
+        }
+        const range = Math.max(1, max-min);
+        for(let i=0, p=0; i<d.length; i+=4, p++){
+          const v = Math.round(((gray[p]-min)/range)*255);
+          d[i]=d[i+1]=d[i+2]=v;
+        }
+        ctx.putImageData(imgData,0,0);
+        resolve({ dataUrl: canvas.toDataURL('image/png'), w, h });
+      };
+      img.onerror = ()=>resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
   async function runOCR(imageId){
     const meta = state.imagesMeta[imageId];
     if(!meta) return;
     const dataUrl = await getImageData(imageId);
     if(!dataUrl){ meta.status='error'; return; }
     try{
-      const { data } = await Tesseract.recognize(dataUrl, 'eng');
+      const pre = await preprocessForOCR(dataUrl);
+      const { data } = await Tesseract.recognize(pre ? pre.dataUrl : dataUrl, 'eng');
       meta.ocrText = data.text || '';
-      meta.words = (data.words||[]).map(w=>({t:w.text, x0:w.bbox.x0, y0:w.bbox.y0, x1:w.bbox.x1, y1:w.bbox.y1}));
+      const rawWords = (data.words||[]).map(w=>({t:w.text, x0:w.bbox.x0, y0:w.bbox.y0, x1:w.bbox.x1, y1:w.bbox.y1}));
+      meta.words = rawWords;
+
+      // Build lines from the (possibly upscaled) OCR word boxes for question/answer pairing,
+      // but color-sample from the ORIGINAL screenshot so highlight colors are accurate.
+      const lines = clusterWordsIntoLines(rawWords);
+      let layoutFields = {};
+      try{
+        const origImg = new Image();
+        await new Promise(res=>{ origImg.onload=res; origImg.onerror=res; origImg.src=dataUrl; });
+        if(origImg.width && pre){
+          const oc = document.createElement('canvas');
+          oc.width = origImg.width; oc.height = origImg.height;
+          const octx = oc.getContext('2d');
+          octx.drawImage(origImg,0,0);
+          const s = origImg.width / pre.w;
+          const scaledLines = lines.map(l=>({...l, x0:l.x0*s, x1:l.x1*s, y0:l.y0*s, y1:l.y1*s}));
+          layoutFields = extractFieldsFromLayout(scaledLines, octx, oc.width, oc.height);
+        } else {
+          layoutFields = extractFieldsFromLayout(lines, null, 0, 0);
+        }
+      }catch(e){ layoutFields = extractFieldsFromLayout(lines, null, 0, 0); }
+
+      meta.layoutFields = layoutFields;
       meta.status = 'done';
       await storeSet('imgmeta:'+imageId, meta);
       mergeFieldsIntoCharacter(meta.characterId);
@@ -484,6 +695,19 @@
       await storeSet('imgmeta:'+imageId, meta);
     }
     render();
+  }
+
+  // Re-runs OCR on every screenshot for a character and rebuilds its fields from scratch —
+  // lets old, inaccurately-scanned uploads benefit from the improved pipeline.
+  async function rescanCharacter(charId){
+    const ch = state.characters[charId];
+    if(!ch) return;
+    ch.fields = {};
+    await storeSet('character:'+charId, ch);
+    const imgs = Object.values(state.imagesMeta).filter(im=>im.characterId===charId);
+    for(const im of imgs){ im.status='pending'; }
+    render();
+    for(const im of imgs){ await runOCR(im.id); }
   }
 
   // ---------- actions ----------
@@ -624,13 +848,14 @@
   }
 
   // ---------- search ----------
+  function normalizeForSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,' ').trim(); }
   function runSearch(q){
-    const query = q.trim().toLowerCase();
+    const query = normalizeForSearch(q);
     if(!query) return [];
     const results = [];
     for(const imgId in state.imagesMeta){
       const meta = state.imagesMeta[imgId];
-      const text = (meta.ocrText||'');
+      const text = (meta.ocrText||'').replace(/\s+/g,' ');
       const idx = text.toLowerCase().indexOf(query);
       if(idx === -1) continue;
       const ch = state.characters[meta.characterId];
@@ -782,8 +1007,9 @@
       <div class="crumb"><button data-action="go-home">Vault</button><span>/</span><button data-action="open-survey" data-id="${s.id}">${esc(s.name)}</button><span>/</span><span>${esc(c.label)}</span></div>
       <h1 class="page-title">${esc(c.label)}</h1>
       <p class="page-desc">Added ${formatDateTime(c.createdAt)}</p>
-      <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" data-action="rename-character" data-id="${c.id}">Rename</button>
+        <button class="btn btn-ghost btn-sm" data-action="rescan-character" data-id="${c.id}" ${imgs.length===0?'disabled':''}>Rescan Screenshots</button>
         <button class="btn btn-danger btn-sm" data-action="delete-character" data-id="${c.id}">Delete Character</button>
       </div>`;
 
@@ -850,18 +1076,34 @@
     lazyLoadVisible();
   }
 
+  // Full-image viewer back: prefer history.back() so it stays in sync with the hardware/
+  // gesture back button (both just pop the state we pushed on open-image); if there's
+  // nothing to pop (image opened with no prior history) fall back to an explicit jump.
+  function closeFullImage(){
+    if(history.state && history.state.nav && history.state.nav.view==='imageFull'){
+      history.back();
+    } else {
+      go({ view:'character', surveyId:nav.surveyId, characterId:nav.characterId, imageId:null });
+    }
+  }
+
   function renderFullImage(){
     const meta = state.imagesMeta[nav.imageId];
-    if(!meta){ nav.view='character'; render(); return; }
+    if(!meta){ closeFullImage(); return; }
     const ch = state.characters[meta.characterId];
     const sv = ch ? state.surveys[ch.surveyId] : null;
     app.innerHTML = `
       <div class="full-view">
         <div class="fv-top">
           <button data-action="close-full">← Back</button>
+          <div class="fv-zoom-controls">
+            <button data-action="zoom-out">−</button>
+            <button data-action="zoom-reset">⤢</button>
+            <button data-action="zoom-in">+</button>
+          </div>
           <button data-action="delete-image-full" data-id="${meta.id}" style="margin-left:auto;">Delete</button>
         </div>
-        <div class="fv-stage">
+        <div class="fv-stage" id="fvStage">
           <div class="fv-imgwrap" id="fvImgWrap">
             <img id="fvImg" />
           </div>
@@ -871,12 +1113,50 @@
           <span>${meta.status==='pending'?'scanning…':meta.status==='error'?'scan failed':'text indexed'}</span>
         </div>
       </div>`;
-    document.querySelector('[data-action="close-full"]').onclick = ()=>{ nav.view='character'; render(); };
+    document.querySelector('[data-action="close-full"]').onclick = closeFullImage;
     document.querySelector('[data-action="delete-image-full"]').onclick = async (e)=>{
       const id = e.currentTarget.getAttribute('data-id');
       await deleteImage(id);
-      nav.view='character'; render();
+      closeFullImage();
     };
+
+    // ---- pinch-to-zoom / double-tap-zoom / drag-to-pan ----
+    const stage = document.getElementById('fvStage');
+    const wrap = document.getElementById('fvImgWrap');
+    let scale=1, tx=0, ty=0;
+    let startDist=0, startScale=1, startTx=0, startTy=0, startX=0, startY=0, dragging=false, lastTap=0;
+    function applyTransform(){ wrap.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`; }
+    function clampScale(s){ return Math.min(5, Math.max(1, s)); }
+    function resetZoom(){ scale=1; tx=0; ty=0; applyTransform(); }
+    function dist(t0,t1){ return Math.hypot(t1.clientX-t0.clientX, t1.clientY-t0.clientY); }
+    stage.addEventListener('touchstart', (e)=>{
+      if(e.touches.length===2){
+        startDist = dist(e.touches[0], e.touches[1]);
+        startScale = scale; startTx = tx; startTy = ty;
+      } else if(e.touches.length===1){
+        const now = Date.now();
+        if(now-lastTap<300){ scale===1 ? (scale=2.5, applyTransform()) : resetZoom(); lastTap=0; }
+        else lastTap = now;
+        if(scale>1){ dragging=true; startX=e.touches[0].clientX-tx; startY=e.touches[0].clientY-ty; }
+      }
+    }, {passive:true});
+    stage.addEventListener('touchmove', (e)=>{
+      if(e.touches.length===2 && startDist){
+        e.preventDefault();
+        scale = clampScale(startScale * (dist(e.touches[0], e.touches[1]) / startDist));
+        applyTransform();
+      } else if(dragging && e.touches.length===1){
+        e.preventDefault();
+        tx = e.touches[0].clientX - startX; ty = e.touches[0].clientY - startY;
+        applyTransform();
+      }
+    }, {passive:false});
+    stage.addEventListener('touchend', ()=>{ startDist=0; dragging=false; });
+    stage.addEventListener('dblclick', ()=>{ scale===1 ? (scale=2.5, applyTransform()) : resetZoom(); });
+    document.querySelector('[data-action="zoom-in"]').onclick = ()=>{ scale=clampScale(scale+0.5); applyTransform(); };
+    document.querySelector('[data-action="zoom-out"]').onclick = ()=>{ scale=clampScale(scale-0.5); if(scale===1){tx=0;ty=0;} applyTransform(); };
+    document.querySelector('[data-action="zoom-reset"]').onclick = resetZoom;
+
     getImageData(meta.id).then(dataUrl=>{
       const img = document.getElementById('fvImg');
       if(!dataUrl) return;
@@ -935,8 +1215,7 @@
       const link = m.querySelector('#mSLink').value.trim();
       const id = await createSurvey(name, link);
       m.remove();
-      nav = { view:'survey', surveyId:id, characterId:null, imageId:null };
-      render();
+      go({ view:'survey', surveyId:id, characterId:null, imageId:null });
     };
     m.querySelector('#mSName').focus();
   }
@@ -975,8 +1254,7 @@
       const label = m.querySelector('#mCLabel').value.trim();
       const id = await createCharacter(surveyId, label || ('Character '+(Object.values(state.characters).filter(c=>c.surveyId===surveyId).length+1)));
       m.remove();
-      nav = { view:'character', surveyId, characterId:id, imageId:null };
-      render();
+      go({ view:'character', surveyId, characterId:id, imageId:null });
     };
     m.querySelector('#mCLabel').focus();
   }
@@ -1060,28 +1338,28 @@
     switch(action){
       case 'clear-search': searchQuery=''; render(); break;
       case 'open-new-survey': newSurveyModal(); break;
-      case 'open-survey': nav = { view:'survey', surveyId:id, characterId:null, imageId:null }; render(); break;
+      case 'open-survey': go({ view:'survey', surveyId:id, characterId:null, imageId:null }); break;
       case 'edit-survey': editSurveyModal(id); break;
-      case 'delete-survey': confirmModal('Delete Survey', 'This removes the survey and all its characters and screenshots.', async ()=>{ await deleteSurvey(id); nav={view:'home'}; render(); }); break;
+      case 'delete-survey': confirmModal('Delete Survey', 'This removes the survey and all its characters and screenshots.', async ()=>{ await deleteSurvey(id); go({view:'home'}); }); break;
       case 'open-new-character': newCharacterModal(nav.surveyId); break;
-      case 'open-character': nav = { view:'character', surveyId: state.characters[id].surveyId, characterId:id, imageId:null }; render(); break;
+      case 'open-character': go({ view:'character', surveyId: state.characters[id].surveyId, characterId:id, imageId:null }); break;
       case 'rename-character': renameCharacterModal(id); break;
-      case 'delete-character': confirmModal('Delete Character', 'This removes the character and all its screenshots.', async ()=>{ const sid=state.characters[id].surveyId; await deleteCharacter(id); nav={view:'survey', surveyId:sid}; render(); }); break;
-      case 'open-image': nav.view='imageFull'; nav.imageId=id; nav.highlightQ=null; render(); break;
+      case 'rescan-character': rescanCharacter(id); break;
+      case 'delete-character': confirmModal('Delete Character', 'This removes the character and all its screenshots.', async ()=>{ const sid=state.characters[id].surveyId; await deleteCharacter(id); go({view:'survey', surveyId:sid}); }); break;
+      case 'open-image': go({ view:'imageFull', surveyId:nav.surveyId, characterId:nav.characterId, imageId:id, highlightQ:null }); break;
       case 'open-search-result': {
         const im = state.imagesMeta[id];
-        nav = { view:'imageFull', surveyId: state.characters[im.characterId] ? state.characters[im.characterId].surveyId : null, characterId: im.characterId, imageId:id, highlightQ: searchQuery.trim() };
-        searchQuery='';
-        render();
+        go({ view:'imageFull', surveyId: state.characters[im.characterId] ? state.characters[im.characterId].surveyId : null, characterId: im.characterId, imageId:id, highlightQ: searchQuery.trim() });
         break;
       }
-      case 'go-home': searchQuery=''; nav={view:'home'}; render(); break;
+      case 'go-home': go({view:'home'}); break;
       case 'export-backup': exportBackup(); break;
     }
   }
 
   // ---------- init ----------
   (async function init(){
+    try{ history.replaceState({ nav: JSON.parse(JSON.stringify(nav)) }, ''); }catch(e){}
     render();
     await loadAll();
     render();
