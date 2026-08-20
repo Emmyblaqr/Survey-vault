@@ -52,6 +52,10 @@
     transform:rotate(-2deg);
   }
   .brand .sub{font-size:11px;color:var(--text-lo);letter-spacing:2px;text-transform:uppercase;}
+  .settings-btn{
+    margin-left:auto;background:var(--surface);border:1px solid var(--line);color:var(--text-hi);
+    border-radius:8px;width:30px;height:30px;font-size:15px;cursor:pointer;
+  }
 
   .search-wrap{position:relative;}
   .search-wrap input{
@@ -662,7 +666,159 @@
     if(changed) storeSet('character:'+charId, ch);
   }
 
-  // ---------- OCR ----------
+  // ---------- AI vision (optional, user-supplied API key) ----------
+  // Supports either Anthropic's native API, or any OpenAI-compatible gateway/proxy
+  // (agentrouter.org and similar routers) — detected from the base URL.
+  const DEFAULT_ANTHROPIC_BASE = 'https://api.anthropic.com';
+  // Presets so the user doesn't have to remember/retype a base URL or exact model ID —
+  // pick a provider, pick a model from its dropdown. "Custom" still allows any other gateway.
+  const AI_PROVIDERS = [
+    { id:'anthropic', label:'Anthropic (official)', baseUrl:'', models:['claude-sonnet-5','claude-haiku-4-5-20251001','claude-opus-4-8'] },
+    { id:'openrouter', label:'OpenRouter (openrouter.ai) — has free vision models', baseUrl:'https://openrouter.ai/api/v1', models:['openrouter/free','google/gemma-4-31b-it:free','moonshotai/kimi-vl-a3b-thinking:free','anthropic/claude-sonnet-5'] },
+    { id:'agentrouter', label:'AgentRouter (agentrouter.org)', baseUrl:'https://agentrouter.org/v1', models:['claude-opus-5','claude-opus-4-8','gpt-5.6-sol'] },
+    { id:'custom', label:'Custom / other gateway', baseUrl:'', models:[] },
+  ];
+  let aiSettingsCache = null;
+  async function getAISettings(){
+    if(aiSettingsCache) return aiSettingsCache;
+    const v = await storeGet('settings:ai');
+    aiSettingsCache = v ? JSON.parse(v) : { apiKey:'', providerId:'anthropic', baseUrl:'', model:'claude-sonnet-5' };
+    return aiSettingsCache;
+  }
+  async function saveAISettings(apiKey, providerId, baseUrl, model){
+    aiSettingsCache = { apiKey: apiKey.trim(), providerId: providerId||'custom', baseUrl: baseUrl.trim(), model: model.trim() || 'claude-sonnet-5' };
+    await storeSet('settings:ai', aiSettingsCache);
+  }
+  function isAnthropicNative(baseUrl){
+    return !baseUrl || /(^|\.)anthropic\.com/i.test(baseUrl);
+  }
+
+  const EXTRACTION_PROMPT = `You are reading ONE screenshot of a survey/form question (mobile UI).
+
+Find any of these fields ONLY if this specific screenshot clearly shows the question AND its answer:
+- name, surname, dob (date of birth), email, phone, state (or a US/Nigerian state mentioned in an address), age, ctc (salary/income/take-home pay/CTC)
+
+For a typed/free-text answer, read the typed value exactly.
+For a radio button / checkbox / chip list, read the text of the option(s) that are visually selected — filled radio dot, checked checkbox, highlighted chip. Do NOT guess an option that isn't clearly marked selected. If it's a "select all that apply" question with several checked boxes, join them with ", ".
+Do not include a field key at all if you're not confident it's answered in this image — do not include unanswered questions, and do not include a field just because its label appears somewhere.
+
+Also transcribe all visible text in the screenshot, top to bottom, as plain text (for search indexing).
+
+Respond with ONLY raw JSON, no markdown fences, no commentary, in exactly this shape:
+{"fields": {"name": "...", "surname": "...", "dob": "...", "email": "...", "phone": "...", "state": "...", "age": "...", "ctc": "..."}, "fullText": "..."}
+Omit any field key from "fields" that you did not confidently find.`;
+
+  // Wraps fetch so a browser-level network failure (almost always CORS, since the request
+  // never reaches the server at all) is reported distinctly from a real HTTP error response.
+  async function fetchOrCorsError(url, opts){
+    try{
+      return await fetch(url, opts);
+    }catch(e){
+      throw new Error('Network/CORS blocked — "'+new URL(url).host+'" is not letting this page call it directly from the browser. Try a different provider or ask them for CORS support.');
+    }
+  }
+
+  // OpenRouter's own docs show these on browser calls (site attribution, not required for
+  // auth) — harmless to send to any OpenAI-compatible gateway, so applied generally.
+  function openAICompatHeaders(apiKey){
+    return {
+      'Content-Type':'application/json',
+      'Authorization': 'Bearer ' + apiKey,
+      'HTTP-Referer': (typeof location!=='undefined' ? location.origin : 'https://survey-vault.local'),
+      'X-Title': 'Survey Vault'
+    };
+  }
+
+  async function callVisionExtract(apiKey, baseUrl, model, dataUrl){
+    const mtMatch = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+    if(!mtMatch) throw new Error('Unreadable image data');
+    const mediaType = mtMatch[1], base64 = mtMatch[2];
+
+    if(isAnthropicNative(baseUrl)){
+      const url = (baseUrl || DEFAULT_ANTHROPIC_BASE).replace(/\/$/,'') + '/v1/messages';
+      const resp = await fetchOrCorsError(url, {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version':'2023-06-01',
+          'anthropic-dangerous-direct-browser-access':'true'
+        },
+        body: JSON.stringify({
+          model: model || 'claude-sonnet-5',
+          max_tokens: 1200,
+          messages: [{
+            role:'user',
+            content: [
+              { type:'image', source:{ type:'base64', media_type: mediaType, data: base64 } },
+              { type:'text', text: EXTRACTION_PROMPT }
+            ]
+          }]
+        })
+      });
+      if(!resp.ok){ const t = await resp.text().catch(()=> ''); throw new Error('API '+resp.status+' '+t.slice(0,150)); }
+      const data = await resp.json();
+      const textBlock = (data.content||[]).find(b=>b.type==='text');
+      if(!textBlock) throw new Error('empty response');
+      return parseExtractionJSON(textBlock.text);
+    }
+
+    // OpenAI-compatible gateway (agentrouter.org and similar): POST {base}/chat/completions
+    // with Bearer auth and an image_url content block holding the data: URL directly.
+    const url = baseUrl.replace(/\/$/,'') + '/chat/completions';
+    const resp = await fetchOrCorsError(url, {
+      method:'POST',
+      headers: openAICompatHeaders(apiKey),
+      body: JSON.stringify({
+        model: model,
+        max_tokens: 1200,
+        messages: [{
+          role:'user',
+          content: [
+            { type:'text', text: EXTRACTION_PROMPT },
+            { type:'image_url', image_url: { url: dataUrl } }
+          ]
+        }]
+      })
+    });
+    if(!resp.ok){ const t = await resp.text().catch(()=> ''); throw new Error('API '+resp.status+' '+t.slice(0,150)); }
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if(!content) throw new Error('empty response');
+    return parseExtractionJSON(typeof content==='string' ? content : JSON.stringify(content));
+  }
+
+  function parseExtractionJSON(raw){
+    const clean = raw.replace(/```json|```/g,'').trim();
+    let parsed;
+    try{ parsed = JSON.parse(clean); }
+    catch(e){ throw new Error('bad JSON from model'); }
+    return { fields: parsed.fields||{}, fullText: parsed.fullText||'' };
+  }
+
+  // Quick, image-free ping so the user can check a provider/key/model combo works before
+  // burning a real scan on it — surfaces the exact same CORS/HTTP errors runOCR would hit.
+  async function testAIConnection(apiKey, baseUrl, model){
+    if(isAnthropicNative(baseUrl)){
+      const url = (baseUrl || DEFAULT_ANTHROPIC_BASE).replace(/\/$/,'') + '/v1/messages';
+      const resp = await fetchOrCorsError(url, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'x-api-key': apiKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+        body: JSON.stringify({ model: model||'claude-sonnet-5', max_tokens: 10, messages:[{role:'user', content:'Reply with just: OK'}] })
+      });
+      if(!resp.ok){ const t = await resp.text().catch(()=>''); throw new Error('API '+resp.status+' '+t.slice(0,150)); }
+      return true;
+    }
+    const url = baseUrl.replace(/\/$/,'') + '/chat/completions';
+    const resp = await fetchOrCorsError(url, {
+      method:'POST',
+      headers: openAICompatHeaders(apiKey),
+      body: JSON.stringify({ model, max_tokens: 10, messages:[{role:'user', content:'Reply with just: OK'}] })
+    });
+    if(!resp.ok){ const t = await resp.text().catch(()=>''); throw new Error('API '+resp.status+' '+t.slice(0,150)); }
+    return true;
+  }
+
   // Loads a dataURL into a canvas, upscales small screenshots and boosts contrast to a
   // clean grayscale — this is the single biggest lever for OCR accuracy on UI screenshots
   // (small text, low-contrast theme colors, anti-aliased fonts all trip Tesseract up).
@@ -706,6 +862,26 @@
     if(!meta) return;
     const dataUrl = await getImageData(imageId);
     if(!dataUrl){ meta.status='error'; return; }
+
+    const settings = await getAISettings();
+    if(settings && settings.apiKey){
+      try{
+        const result = await callVisionExtract(settings.apiKey, settings.baseUrl, settings.model, dataUrl);
+        meta.ocrText = result.fullText || '';
+        meta.words = []; // AI vision gives no per-word bounding boxes, so no in-image highlight boxes
+        meta.layoutFields = result.fields || {};
+        meta.status = 'done';
+        meta.method = 'ai';
+        await storeSet('imgmeta:'+imageId, meta);
+        mergeFieldsIntoCharacter(meta.characterId);
+        render();
+        return;
+      }catch(e){
+        showToast('AI read failed (' + e.message.slice(0,50) + ') — using free OCR instead');
+        // fall through to the Tesseract pipeline below
+      }
+    }
+
     try{
       const pre = await preprocessForOCR(dataUrl);
       const { data } = await Tesseract.recognize(pre ? pre.dataUrl : dataUrl, 'eng');
@@ -735,6 +911,7 @@
 
       meta.layoutFields = layoutFields;
       meta.status = 'done';
+      meta.method = 'ocr';
       await storeSet('imgmeta:'+imageId, meta);
       mergeFieldsIntoCharacter(meta.characterId);
     }catch(e){
@@ -922,7 +1099,10 @@
   function topbarHtml(){
     return `
       <div class="topbar">
-        <div class="brand"><span class="stamp">FIELD VAULT</span><span class="sub">Survey Records</span></div>
+        <div class="brand">
+          <span class="stamp">FIELD VAULT</span><span class="sub">Survey Records</span>
+          <button data-action="open-settings" class="settings-btn" title="AI settings">⚙</button>
+        </div>
         <div class="search-wrap">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a9b8ad" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <input id="searchInput" type="text" placeholder="Search any word across all screenshots…" value="${escAttr(searchQuery)}" />
@@ -1086,7 +1266,7 @@
         <div class="img-thumb" data-action="open-image" data-id="${im.id}">
           ${cached ? `<img src="${cached}" loading="lazy"/>` : `<img data-lazy="${im.id}" loading="lazy"/>`}
           <div class="badge date-badge">${formatShort(im.createdAt)}</div>
-          <div class="badge ${im.status}">${im.status==='pending'?'scanning…':im.status==='error'?'error':'read'}</div>
+          <div class="badge ${im.status}">${im.status==='pending'?'scanning…':im.status==='error'?'error':(im.method==='ai'?'AI read':'OCR read')}</div>
         </div>`;
       }).join('') + `</div>`;
     }
@@ -1157,7 +1337,7 @@
         </div>
         <div class="fv-status">
           <span>${sv?esc(sv.name):''} ${ch?'› '+esc(ch.label):''} · uploaded ${formatDateTime(meta.createdAt)}</span>
-          <span>${meta.status==='pending'?'scanning…':meta.status==='error'?'scan failed':'text indexed'}</span>
+          <span>${meta.status==='pending'?'scanning…':meta.status==='error'?'scan failed':(meta.method==='ai'?'AI read':'OCR read')+' · text indexed'}</span>
         </div>
       </div>`;
     document.querySelector('[data-action="close-full"]').onclick = closeFullImage;
@@ -1324,6 +1504,93 @@
     };
   }
 
+  function settingsModal(){
+    getAISettings().then(s=>{
+      const provider = AI_PROVIDERS.find(p=>p.id===s.providerId) || AI_PROVIDERS[0];
+      const isKnownModel = provider.models.includes(s.model);
+      const m = openModal(`
+        <h2>AI-Assisted Reading</h2>
+        <p class="page-desc">Optional — reads screenshots with an AI vision model instead of local OCR for much more reliable field detection. Sent directly from this device to the provider below using your key — stored only on this device. Leave the key blank to keep using the free local OCR.</p>
+        <div class="field-group"><label>API Key</label><input id="mAIKey" type="password" placeholder="sk-…" value="${escAttr(s.apiKey||'')}" /></div>
+        <div class="field-group"><label>Provider</label>
+          <select id="mAIProvider" class="status-select" style="width:100%;">
+            ${AI_PROVIDERS.map(p=>`<option value="${p.id}" ${p.id===provider.id?'selected':''}>${esc(p.label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group" id="mAIBaseWrap" style="${provider.id==='custom'?'':'display:none;'}">
+          <label>Base URL</label><input id="mAIBase" type="text" placeholder="https://…/v1" value="${escAttr(s.baseUrl||provider.baseUrl||'')}" />
+        </div>
+        <div class="field-group" id="mAIModelSelectWrap" style="${provider.models.length?'':'display:none;'}">
+          <label>Model</label>
+          <select id="mAIModelSelect" class="status-select" style="width:100%;">
+            ${provider.models.map(mo=>`<option value="${mo}" ${mo===s.model?'selected':''}>${esc(mo)}</option>`).join('')}
+            <option value="__custom__" ${!isKnownModel?'selected':''}>Custom…</option>
+          </select>
+        </div>
+        <div class="field-group" id="mAIModelTextWrap" style="${provider.models.length && isKnownModel?'display:none;':''}">
+          <label>Model name <span style="font-weight:400;color:var(--text-lo);">(exact ID from your provider)</span></label>
+          <input id="mAIModelText" type="text" placeholder="e.g. claude-opus-5" value="${escAttr(s.model||'')}" />
+        </div>
+        <div id="mAITestResult" style="font-size:13px;margin:4px 0 8px;"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="mAITest" type="button">Test Connection</button>
+          <button class="btn btn-ghost" data-close>Cancel</button>
+          <button class="btn btn-primary" id="mAISave">Save</button>
+        </div>`);
+
+      function currentValues(){
+        const providerId = m.querySelector('#mAIProvider').value;
+        const p = AI_PROVIDERS.find(x=>x.id===providerId) || AI_PROVIDERS[0];
+        const baseEl = m.querySelector('#mAIBase');
+        const baseUrl = (p.id==='custom' && baseEl) ? baseEl.value : p.baseUrl;
+        const modelSel = m.querySelector('#mAIModelSelect');
+        const modelText = m.querySelector('#mAIModelText');
+        const model = (modelSel && modelSel.value !== '__custom__') ? modelSel.value : (modelText ? modelText.value : '');
+        return { providerId, baseUrl, model, apiKey: m.querySelector('#mAIKey').value };
+      }
+
+      m.querySelector('#mAIProvider').onchange = (e)=>{
+        const p = AI_PROVIDERS.find(x=>x.id===e.target.value) || AI_PROVIDERS[0];
+        m.querySelector('#mAIBaseWrap').style.display = p.id==='custom' ? '' : 'none';
+        if(m.querySelector('#mAIBase')) m.querySelector('#mAIBase').value = p.baseUrl||'';
+        const selWrap = m.querySelector('#mAIModelSelectWrap');
+        const txtWrap = m.querySelector('#mAIModelTextWrap');
+        if(p.models.length){
+          selWrap.style.display='';
+          selWrap.querySelector('select').innerHTML = p.models.map(mo=>`<option value="${mo}">${esc(mo)}</option>`).join('') + `<option value="__custom__">Custom…</option>`;
+          txtWrap.style.display='none';
+        } else {
+          selWrap.style.display='none';
+          txtWrap.style.display='';
+        }
+      };
+      const modelSelEl = m.querySelector('#mAIModelSelect');
+      if(modelSelEl){
+        modelSelEl.onchange = ()=>{
+          m.querySelector('#mAIModelTextWrap').style.display = modelSelEl.value==='__custom__' ? '' : 'none';
+        };
+      }
+      m.querySelector('#mAITest').onclick = async ()=>{
+        const v = currentValues();
+        const resultEl = m.querySelector('#mAITestResult');
+        resultEl.textContent = 'Testing…'; resultEl.style.color = 'var(--text-lo)';
+        try{
+          await testAIConnection(v.apiKey, v.baseUrl, v.model);
+          resultEl.textContent = '✓ Connected successfully'; resultEl.style.color = '#4caf7d';
+        }catch(e){
+          resultEl.textContent = '✕ ' + e.message; resultEl.style.color = '#e0685a';
+        }
+      };
+      m.querySelector('[data-close]').onclick = ()=>m.remove();
+      m.querySelector('#mAISave').onclick = async ()=>{
+        const v = currentValues();
+        await saveAISettings(v.apiKey, v.providerId, v.baseUrl, v.model);
+        m.remove();
+        showToast(v.apiKey.trim() ? 'AI reading enabled' : 'AI reading disabled — using free OCR');
+      };
+    });
+  }
+
   function confirmModal(title, desc, onConfirm){
     const m = openModal(`
       <h2>${esc(title)}</h2>
@@ -1384,6 +1651,7 @@
     const id = el.getAttribute('data-id');
     switch(action){
       case 'clear-search': searchQuery=''; render(); break;
+      case 'open-settings': settingsModal(); break;
       case 'open-new-survey': newSurveyModal(); break;
       case 'open-survey': go({ view:'survey', surveyId:id, characterId:null, imageId:null }); break;
       case 'edit-survey': editSurveyModal(id); break;
