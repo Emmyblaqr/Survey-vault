@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Field Vault — Survey Records</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+<style>
+  :root{
+    --ink:#141f1a;
+    --surface:#1c2b23;
+    --surface-2:#233729;
+    --line: rgba(240,232,204,0.14);
+    --paper:#efe6ce;
+    --paper-dim:#e3d8b9;
+    --mustard:#c98a2c;
+    --mustard-bright:#e0a63f;
+    --teal:#4fa88a;
+    --red-stamp:#a8432f;
+    --highlight: rgba(255,214,0,0.55);
+    --text-hi:#f3ecd8;
+    --text-lo:#a9b8ad;
+    --danger:#c1503a;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(79,168,138,0.08), transparent),
+      var(--ink);
+    color:var(--text-hi);
+    font-family:'IBM Plex Sans', sans-serif;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  #app{max-width:640px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;}
+
+  .topbar{
+    position:sticky;top:0;z-index:20;
+    background:linear-gradient(180deg, var(--ink) 80%, transparent);
+    padding:16px 16px 8px;
+    border-bottom:1px solid var(--line);
+  }
+  .brand{
+    display:flex;align-items:baseline;gap:8px;margin-bottom:12px;
+  }
+  .brand .stamp{
+    font-family:'Special Elite', monospace;
+    font-size:20px;letter-spacing:1px;color:var(--mustard-bright);
+    transform:rotate(-2deg);
+  }
+  .brand .sub{font-size:11px;color:var(--text-lo);letter-spacing:2px;text-transform:uppercase;}
+
+  .search-wrap{position:relative;}
+  .search-wrap input{
+    width:100%;padding:11px 14px 11px 38px;border-radius:8px;
+    border:1px solid var(--line);background:var(--surface);
+    color:var(--text-hi);font-size:15px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .search-wrap input::placeholder{color:var(--text-lo);}
+  .search-wrap input:focus{outline:2px solid var(--teal);outline-offset:1px;}
+  .search-wrap svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:0.6;}
+  .search-clear{
+    position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    background:none;border:none;color:var(--text-lo);font-size:18px;cursor:pointer;padding:4px 8px;
+  }
+
+  .content{flex:1;padding:14px 16px 90px;}
+
+  .crumb{
+    display:flex;align-items:center;gap:6px;margin-bottom:14px;font-size:13px;color:var(--text-lo);
+  }
+  .crumb button{
+    background:none;border:none;color:var(--teal);font-family:inherit;font-size:13px;cursor:pointer;padding:2px 0;
+  }
+
+  h1.page-title{font-family:'Special Elite',monospace;font-size:22px;font-weight:400;margin:2px 0 4px;color:var(--text-hi);}
+  .page-desc{color:var(--text-lo);font-size:13px;margin:0 0 16px;}
+
+  .stat-row{display:flex;gap:10px;margin-bottom:18px;}
+  .stat{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;}
+  .stat .n{font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:var(--mustard-bright);}
+  .stat .l{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-lo);}
+
+  .card-list{display:flex;flex-direction:column;gap:10px;}
+  .survey-card{
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;
+    display:flex;gap:12px;align-items:center;cursor:pointer;transition:border-color .15s;
+  }
+  .survey-card:active{border-color:var(--teal);}
+  .folder-tab{
+    width:42px;height:42px;border-radius:8px;background:var(--paper);color:var(--ink);
+    display:flex;align-items:center;justify-content:center;font-family:'Special Elite',monospace;
+    font-size:16px;flex-shrink:0;transform:rotate(-3deg);box-shadow:2px 2px 0 rgba(0,0,0,0.25);
+  }
+  .survey-card .meta{flex:1;min-width:0;}
+  .survey-card .name{font-weight:600;font-size:15px;color:var(--text-hi);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .survey-card .sub{font-size:12px;color:var(--text-lo);margin-top:2px;}
+  .survey-card .chev{color:var(--text-lo);font-size:18px;}
+
+  .btn{
+    font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:14px;border:none;border-radius:8px;
+    padding:11px 16px;cursor:pointer;
+  }
+  .btn-primary{background:var(--mustard);color:#1c1204;}
+  .btn-primary:active{background:var(--mustard-bright);}
+  .btn-ghost{background:var(--surface);color:var(--text-hi);border:1px solid var(--line);}
+  .btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(193,80,58,0.4);}
+  .btn-block{width:100%;}
+  .btn-sm{padding:7px 12px;font-size:13px;}
+
+  .fab{
+    position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+    max-width:608px;width:calc(100% - 32px);z-index:15;
+  }
+
+  .field-group{margin-bottom:12px;}
+  .field-group label{display:block;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-lo);margin-bottom:5px;}
+  .field-group input, .field-group textarea{
+    width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);
+    background:var(--surface);color:var(--text-hi);font-size:15px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .modal-backdrop{
+    position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:40;
+    display:flex;align-items:flex-end;justify-content:center;
+  }
+  .modal{
+    background:var(--ink);border:1px solid var(--line);border-radius:16px 16px 0 0;
+    width:100%;max-width:640px;padding:20px 18px calc(20px + env(safe-area-inset-bottom));
+    max-height:85vh;overflow-y:auto;
+  }
+  .modal h2{font-family:'Special Elite',monospace;font-weight:400;font-size:18px;margin:0 0 14px;}
+  .modal-actions{display:flex;gap:10px;margin-top:8px;}
+  .modal-actions .btn{flex:1;}
+
+  .char-card{
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;
+    margin-bottom:10px;cursor:pointer;
+  }
+  .char-head{display:flex;align-items:center;gap:10px;}
+  .id-stamp{
+    width:38px;height:38px;border-radius:50%;border:2px solid var(--red-stamp);color:var(--red-stamp);
+    display:flex;align-items:center;justify-content:center;font-family:'Special Elite',monospace;
+    font-size:13px;transform:rotate(-8deg);flex-shrink:0;
+  }
+  .char-head .label{font-weight:600;font-size:15px;}
+  .char-head .count{font-size:12px;color:var(--text-lo);margin-top:1px;}
+  .field-chip-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+  .field-chip{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:6px;padding:4px 8px;color:var(--paper-dim);
+  }
+  .field-chip b{color:var(--text-hi);font-weight:600;}
+
+  .id-card{
+    background:var(--paper);color:var(--ink);border-radius:12px;padding:16px;margin-bottom:18px;
+    box-shadow:3px 3px 0 rgba(0,0,0,0.3);
+  }
+  .id-card .row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
+  .id-card .stamp-big{
+    font-family:'Special Elite',monospace;font-size:11px;letter-spacing:1px;color:var(--red-stamp);
+    border:2px solid var(--red-stamp);border-radius:4px;padding:3px 6px;transform:rotate(-4deg);
+  }
+  .id-card .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin-top:6px;}
+  .id-card .fld{grid-column: span 1;}
+  .id-card .fld.wide{grid-column: span 2;}
+  .id-card .fld label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#6b6046;margin-bottom:3px;}
+  .id-card .fld input{
+    width:100%;background:rgba(255,255,255,0.5);border:1px solid rgba(0,0,0,0.15);border-radius:5px;
+    padding:6px 8px;font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink);
+  }
+
+  .img-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .img-thumb{
+    position:relative;aspect-ratio:9/16;border-radius:8px;overflow:hidden;background:var(--surface-2);
+    border:1px solid var(--line);cursor:pointer;
+  }
+  .img-thumb img{width:100%;height:100%;object-fit:cover;display:block;}
+  .img-thumb .badge{
+    position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,0.65);color:var(--text-hi);
+    font-size:9px;padding:2px 5px;border-radius:4px;font-family:'IBM Plex Mono',monospace;
+  }
+  .img-thumb .badge.pending{color:var(--mustard-bright);}
+  .img-thumb .badge.error{color:var(--danger);}
+  .upload-tile{
+    aspect-ratio:9/16;border-radius:8px;border:1.5px dashed var(--line);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+    color:var(--text-lo);font-size:11px;cursor:pointer;
+  }
+
+  .empty{
+    text-align:center;padding:50px 20px;color:var(--text-lo);
+  }
+  .empty .stamp{font-family:'Special Elite',monospace;font-size:16px;color:var(--text-lo);margin-bottom:6px;}
+
+  .search-results .result{
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;
+    display:flex;gap:10px;margin-bottom:10px;cursor:pointer;
+  }
+  .search-results .result img{width:56px;height:80px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--surface-2);}
+  .search-results .result .rmeta{flex:1;min-width:0;}
+  .search-results .result .path{font-size:11px;color:var(--text-lo);margin-bottom:4px;}
+  .search-results .result .snippet{font-size:13px;color:var(--paper-dim);line-height:1.4;}
+  .search-results .result mark{background:var(--highlight);color:var(--ink);padding:0 2px;border-radius:2px;}
+  .result-count{font-size:12px;color:var(--text-lo);margin-bottom:12px;}
+
+  .full-view{position:fixed;inset:0;background:#000;z-index:50;display:flex;flex-direction:column;}
+  .full-view .fv-top{
+    padding:14px 16px;display:flex;align-items:center;gap:12px;
+    background:linear-gradient(180deg, rgba(0,0,0,0.8), transparent);position:absolute;top:0;left:0;right:0;z-index:2;
+  }
+  .full-view .fv-top button{background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;padding:8px 10px;font-size:14px;}
+  .fv-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;position:relative;}
+  .fv-imgwrap{position:relative;max-width:100%;}
+  .fv-imgwrap img{max-width:100%;max-height:85vh;display:block;}
+  .hl-box{position:absolute;border:2px solid #ffd600;background:rgba(255,214,0,0.32);border-radius:2px;}
+  .fv-status{
+    position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(0deg, rgba(0,0,0,0.8), transparent);color:var(--text-lo);font-size:12px;
+    display:flex;justify-content:space-between;align-items:center;
+  }
+
+  .ocr-progress{
+    display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mustard-bright);
+    background:var(--surface-2);border-radius:8px;padding:8px 10px;margin-bottom:12px;
+  }
+  .spinner{
+    width:14px;height:14px;border-radius:50%;border:2px solid rgba(224,166,63,0.3);
+    border-top-color:var(--mustard-bright);animation:spin 0.8s linear infinite;flex-shrink:0;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  a.link-out{color:var(--teal);word-break:break-all;font-size:12px;}
+  .status-chip{
+    font-size:10px;font-family:'IBM Plex Mono',monospace;padding:3px 8px;border-radius:20px;
+    background:color-mix(in srgb, var(--sc) 20%, transparent);color:var(--sc);border:1px solid var(--sc);
+    flex-shrink:0;white-space:nowrap;
+  }
+  .status-select{
+    background:var(--surface);color:var(--text-hi);border:1px solid var(--line);border-radius:8px;
+    padding:8px 10px;font-size:13px;font-family:'IBM Plex Sans',sans-serif;
+  }
+  .badge.date-badge{position:absolute;top:4px;left:4px;bottom:auto;right:auto;color:var(--text-hi);}
+  .section-label{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-lo);margin:18px 0 8px;}
+  .toast{
+    position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--surface-2);
+    border:1px solid var(--line);color:var(--text-hi);padding:10px 16px;border-radius:20px;
+    font-size:13px;z-index:60;box-shadow:0 4px 20px rgba(0,0,0,0.4);
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- state ----------
+  let state = {
+    surveys: {},      // id -> {id,name,link,createdAt}
+    characters: {},   // id -> {id,surveyId,label,fields:{},createdAt}
+    imagesMeta: {},   // id -> {id,characterId,ocrText,words,status,createdAt,w,h}
+    imageDataCache: {}, // id -> dataUrl (lazy)
+    loaded: false,
+  };
+  let nav = { view:'home', surveyId:null, characterId:null, imageId:null, highlightQ:null };
+  let searchQuery = '';
+  let toastTimer = null;
+
+  const FIELD_DEFS = [
+    ['name','Name'],['surname','Surname'],['dob','Date of Birth'],
+    ['email','Email'],['phone','Phone'],['state','State'],['age','Age']
+  ];
+  const NG_STATES = ["Abia","Adamawa","Akwa Ibom","Anambra","Bauchi","Bayelsa","Benue","Borno","Cross River","Delta","Ebonyi","Edo","Ekiti","Enugu","Gombe","Imo","Jigawa","Kaduna","Kano","Katsina","Kebbi","Kogi","Kwara","Lagos","Nasarawa","Niger","Ogun","Ondo","Osun","Oyo","Plateau","Rivers","Sokoto","Taraba","Yobe","Zamfara","FCT","Abuja"];
+
+  function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,9); }
+  function esc(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escAttr(s){ return esc(s).replace(/\n/g,' '); }
+  function formatDate(ts){
+    if(!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+  }
+  function formatDateTime(ts){
+    if(!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' +
+           d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  }
+  function formatShort(ts){
+    if(!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString(undefined,{month:'2-digit',day:'2-digit'});
+  }
+  const STATUS_OPTS = ['New','In Progress','Submitted','Paid'];
+  const STATUS_COLOR = {'New':'#8a95a5','In Progress':'#c98a2c','Submitted':'#4fa88a','Paid':'#6fb56f'};
+
+  function showToast(msg){
+    clearTimeout(toastTimer);
+    let t = document.querySelector('.toast');
+    if(!t){ t=document.createElement('div'); t.className='toast'; document.body.appendChild(t); }
+    t.textContent = msg;
+    toastTimer = setTimeout(()=>{ t.remove(); }, 2200);
+  }
+
+  // ---------- storage ----------
+  // Uses Claude's window.storage when running inside a Claude artifact.
+  // Falls back to a same-shaped IndexedDB adapter when hosted standalone (e.g. GitHub Pages),
+  // so the exact same file works in both places.
+  const hasWidgetStorage = (typeof window !== 'undefined') && window.storage && typeof window.storage.get === 'function';
+
+  let idbPromise = null;
+  function getIDB(){
+    if(idbPromise) return idbPromise;
+    idbPromise = new Promise((resolve, reject)=>{
+      const req = indexedDB.open('field-vault-db', 1);
+      req.onupgradeneeded = ()=>{ req.result.createObjectStore('kv'); };
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+    return idbPromise;
+  }
+  const idbAdapter = {
+    async get(key){
+      const db = await getIDB();
+      return new Promise(resolve=>{
+        const tx = db.transaction('kv','readonly');
+        const req = tx.objectStore('kv').get(key);
+        req.onsuccess = ()=>resolve(req.result!==undefined ? {key, value:req.result} : null);
+        req.onerror = ()=>resolve(null);
+      });
+    },
+    async set(key, value){
+      const db = await getIDB();
+      return new Promise(resolve=>{
+        const tx = db.transaction('kv','readwrite');
+        tx.objectStore('kv').put(value, key);
+        tx.oncomplete = ()=>resolve({key,value});
+        tx.onerror = ()=>resolve(null);
+      });
+    },
+    async delete(key){
+      const db = await getIDB();
+      return new Promise(resolve=>{
+        const tx = db.transaction('kv','readwrite');
+        tx.objectStore('kv').delete(key);
+        tx.oncomplete = ()=>resolve({key,deleted:true});
+        tx.onerror = ()=>resolve(null);
+      });
+    },
+    async list(prefix){
+      const db = await getIDB();
+      return new Promise(resolve=>{
+        const tx = db.transaction('kv','readonly');
+        const store = tx.objectStore('kv');
+        const keys = [];
+        const req = store.openKeyCursor ? store.openKeyCursor() : null;
+        if(!req){ resolve({keys:[]}); return; }
+        req.onsuccess = (e)=>{
+          const cursor = e.target.result;
+          if(cursor){
+            if(!prefix || String(cursor.key).startsWith(prefix)) keys.push(cursor.key);
+            cursor.continue();
+          } else {
+            resolve({keys});
+          }
+        };
+        req.onerror = ()=>resolve({keys:[]});
+      });
+    }
+  };
+  const storageImpl = hasWidgetStorage ? window.storage : idbAdapter;
+
+  async function storeGet(key){
+    try{ const r = await storageImpl.get(key, false); return r ? r.value : null; }
+    catch(e){ return null; }
+  }
+  async function storeSet(key, valueObj){
+    try{
+      const r = await storageImpl.set(key, JSON.stringify(valueObj), false);
+      return !!r;
+    }catch(e){ return false; }
+  }
+  async function storeDelete(key){
+    try{ await storageImpl.delete(key, false); }catch(e){}
+  }
+  async function storeList(prefix){
+    try{ const r = await storageImpl.list(prefix, false); return r ? r.keys : []; }
+    catch(e){ return []; }
+  }
+
+  async function loadAll(){
+    const [sKeys, cKeys, mKeys] = await Promise.all([
+      storeList('survey:'), storeList('character:'), storeList('imgmeta:')
+    ]);
+    const sVals = await Promise.all(sKeys.map(k=>storeGet(k)));
+    sVals.forEach(v=>{ if(v){ const o=JSON.parse(v); state.surveys[o.id]=o; } });
+    const cVals = await Promise.all(cKeys.map(k=>storeGet(k)));
+    cVals.forEach(v=>{ if(v){ const o=JSON.parse(v); state.characters[o.id]=o; } });
+    const mVals = await Promise.all(mKeys.map(k=>storeGet(k)));
+    mVals.forEach(v=>{ if(v){ const o=JSON.parse(v); state.imagesMeta[o.id]=o; } });
+    state.loaded = true;
+  }
+
+  async function getImageData(imageId){
+    if(state.imageDataCache[imageId]) return state.imageDataCache[imageId];
+    const v = await storeGet('imgdata:'+imageId);
+    if(v){ const o=JSON.parse(v); state.imageDataCache[imageId]=o.dataUrl; return o.dataUrl; }
+    return null;
+  }
+
+  // ---------- field extraction ----------
+  function extractFields(text){
+    const fields = {};
+    let m;
+    m = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+    if(m) fields.email = m[0];
+
+    m = text.match(/(?:\+?234|0)[\s-]?[789][01]\d{8}/) || text.match(/\+?\d[\d \-]{8,14}\d/);
+    if(m) fields.phone = m[0].replace(/\s+/g,' ').trim();
+
+    m = text.match(/\b(0?[1-9]|[12]\d|3[01])[\/\-.](0?[1-9]|1[0-2])[\/\-.](\d{4}|\d{2})\b/)
+      || text.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b/i)
+      || text.match(/\bDate\s*of\s*Birth[:\s]+([^\n]{4,20})/i);
+    if(m) fields.dob = (m[1] && !/^\d+$/.test(m[1])) ? m[1].trim() : m[0];
+
+    m = text.match(/\bAge[:\s]+(\d{1,3})\b/i) || text.match(/\b(\d{1,2})\s*(?:years old|yrs old|yrs)\b/i);
+    if(m) fields.age = m[1];
+
+    const lines = text.split(/\n+/);
+    const labelMap = {
+      name: /^(?:first\s*name|given\s*name|full\s*name|name)\s*[:\-]\s*(.+)$/i,
+      surname: /^(?:surname|last\s*name|family\s*name)\s*[:\-]\s*(.+)$/i,
+      state: /^(?:state)\s*[:\-]\s*(.+)$/i,
+      email: /^(?:email)\s*[:\-]\s*(.+)$/i,
+      phone: /^(?:phone|mobile|tel)\s*[:\-]\s*(.+)$/i,
+    };
+    for(const line of lines){
+      for(const key in labelMap){
+        const mm = line.match(labelMap[key]);
+        if(mm) fields[key]=mm[1].trim();
+      }
+    }
+    if(!fields.state){
+      for(const s of NG_STATES){
+        if(new RegExp('\\b'+s.replace(/\s/g,'\\s+')+'\\b','i').test(text)){ fields.state=s; break; }
+      }
+    }
+    return fields;
+  }
+
+  function mergeFieldsIntoCharacter(charId){
+    const ch = state.characters[charId];
+    if(!ch) return;
+    const imgIds = Object.values(state.imagesMeta).filter(im=>im.characterId===charId).map(im=>im.id);
+    const combined = imgIds.map(id=>state.imagesMeta[id].ocrText||'').join('\n');
+    const extracted = extractFields(combined);
+    ch.fields = ch.fields || {};
+    let changed = false;
+    for(const k in extracted){
+      if(!ch.fields[k]){ ch.fields[k] = extracted[k]; changed = true; }
+    }
+    if(changed) storeSet('character:'+charId, ch);
+  }
+
+  // ---------- OCR ----------
+  async function runOCR(imageId){
+    const meta = state.imagesMeta[imageId];
+    if(!meta) return;
+    const dataUrl = await getImageData(imageId);
+    if(!dataUrl){ meta.status='error'; return; }
+    try{
+      const { data } = await Tesseract.recognize(dataUrl, 'eng');
+      meta.ocrText = data.text || '';
+      meta.words = (data.words||[]).map(w=>({t:w.text, x0:w.bbox.x0, y0:w.bbox.y0, x1:w.bbox.x1, y1:w.bbox.y1}));
+      meta.status = 'done';
+      await storeSet('imgmeta:'+imageId, meta);
+      mergeFieldsIntoCharacter(meta.characterId);
+    }catch(e){
+      meta.status = 'error';
+      await storeSet('imgmeta:'+imageId, meta);
+    }
+    render();
+  }
+
+  // ---------- actions ----------
+  async function createSurvey(name, link){
+    const id = uid();
+    const obj = { id, name: name.trim(), link: (link||'').trim(), status:'New', createdAt: Date.now() };
+    state.surveys[id] = obj;
+    await storeSet('survey:'+id, obj);
+    return id;
+  }
+
+  async function createCharacter(surveyId, label){
+    const id = uid();
+    const obj = { id, surveyId, label: label.trim() || 'Unnamed', fields:{}, createdAt: Date.now() };
+    state.characters[id] = obj;
+    await storeSet('character:'+id, obj);
+    return id;
+  }
+
+  async function updateCharacterField(charId, key, value){
+    const ch = state.characters[charId];
+    ch.fields = ch.fields || {};
+    ch.fields[key] = value;
+    await storeSet('character:'+charId, ch);
+  }
+
+  async function updateCharacterLabel(charId, label){
+    const ch = state.characters[charId];
+    ch.label = label;
+    await storeSet('character:'+charId, ch);
+  }
+
+  async function updateSurvey(surveyId, name, link, status){
+    const s = state.surveys[surveyId];
+    s.name = name; s.link = link;
+    if(status) s.status = status;
+    await storeSet('survey:'+surveyId, s);
+  }
+
+  async function deleteImage(imageId){
+    const meta = state.imagesMeta[imageId];
+    delete state.imagesMeta[imageId];
+    delete state.imageDataCache[imageId];
+    await storeDelete('imgmeta:'+imageId);
+    await storeDelete('imgdata:'+imageId);
+  }
+
+  async function deleteCharacter(charId){
+    const imgIds = Object.values(state.imagesMeta).filter(im=>im.characterId===charId).map(im=>im.id);
+    for(const id of imgIds) await deleteImage(id);
+    delete state.characters[charId];
+    await storeDelete('character:'+charId);
+  }
+
+  async function deleteSurvey(surveyId){
+    const charIds = Object.values(state.characters).filter(c=>c.surveyId===surveyId).map(c=>c.id);
+    for(const id of charIds) await deleteCharacter(id);
+    delete state.surveys[surveyId];
+    await storeDelete('survey:'+surveyId);
+  }
+
+  async function handleFiles(characterId, fileList){
+    const files = Array.from(fileList);
+    for(const file of files){
+      if(!file.type.startsWith('image/')) continue;
+      const dataUrl = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = ()=>res(r.result);
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      const id = uid();
+      const meta = { id, characterId, ocrText:'', words:[], status:'pending', createdAt: Date.now() };
+      state.imagesMeta[id] = meta;
+      state.imageDataCache[id] = dataUrl;
+      const okMeta = await storeSet('imgmeta:'+id, meta);
+      const okData = await storeSet('imgdata:'+id, {dataUrl});
+      if(!okData){
+        meta.status = 'error';
+        showToast('Image too large to store — try a smaller screenshot');
+      }
+      render();
+      if(okData) runOCR(id); // fire and forget, re-renders on completion
+    }
+    render();
+  }
+
+  // ---------- backup / restore ----------
+  async function exportBackup(){
+    showToast('Preparing backup…');
+    const imagesData = {};
+    const ids = Object.keys(state.imagesMeta);
+    for(const id of ids){
+      const dataUrl = await getImageData(id);
+      if(dataUrl) imagesData[id] = dataUrl;
+    }
+    const payload = {
+      app:'field-vault', version:1, exportedAt: Date.now(),
+      surveys: state.surveys, characters: state.characters,
+      imagesMeta: state.imagesMeta, imagesData
+    };
+    const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0,10);
+    a.href = url; a.download = `field-vault-backup-${stamp}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    showToast('Backup downloaded');
+  }
+
+  async function importBackup(file){
+    try{
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      if(!payload || payload.app !== 'field-vault') { showToast('Not a Field Vault backup file'); return; }
+      for(const id in payload.surveys||{}){
+        state.surveys[id] = payload.surveys[id];
+        await storeSet('survey:'+id, payload.surveys[id]);
+      }
+      for(const id in payload.characters||{}){
+        state.characters[id] = payload.characters[id];
+        await storeSet('character:'+id, payload.characters[id]);
+      }
+      for(const id in payload.imagesMeta||{}){
+        state.imagesMeta[id] = payload.imagesMeta[id];
+        await storeSet('imgmeta:'+id, payload.imagesMeta[id]);
+      }
+      for(const id in payload.imagesData||{}){
+        state.imageDataCache[id] = payload.imagesData[id];
+        await storeSet('imgdata:'+id, {dataUrl: payload.imagesData[id]});
+      }
+      showToast('Backup restored');
+      render();
+    }catch(e){
+      showToast('Could not read that backup file');
+    }
+  }
+
+  // ---------- search ----------
+  function runSearch(q){
+    const query = q.trim().toLowerCase();
+    if(!query) return [];
+    const results = [];
+    for(const imgId in state.imagesMeta){
+      const meta = state.imagesMeta[imgId];
+      const text = (meta.ocrText||'');
+      const idx = text.toLowerCase().indexOf(query);
+      if(idx === -1) continue;
+      const ch = state.characters[meta.characterId];
+      const sv = ch ? state.surveys[ch.surveyId] : null;
+      const start = Math.max(0, idx-40);
+      const end = Math.min(text.length, idx+query.length+40);
+      const snippet = (start>0?'…':'') + text.slice(start,end).replace(/\s+/g,' ') + (end<text.length?'…':'');
+      results.push({ imgId, characterId: meta.characterId, ch, sv, snippet, idx });
+    }
+    results.sort((a,b)=>b.idx-a.idx);
+    return results;
+  }
+
+  // ---------- rendering ----------
+  const app = document.getElementById('app');
+
+  function topbarHtml(){
+    return `
+      <div class="topbar">
+        <div class="brand"><span class="stamp">FIELD VAULT</span><span class="sub">Survey Records</span></div>
+        <div class="search-wrap">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a9b8ad" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input id="searchInput" type="text" placeholder="Search any word across all screenshots…" value="${escAttr(searchQuery)}" />
+          ${searchQuery ? `<button class="search-clear" data-action="clear-search">✕</button>` : ''}
+        </div>
+      </div>`;
+  }
+
+  function render(){
+    if(!state.loaded){
+      app.innerHTML = `<div class="content"><div class="empty"><div class="stamp">LOADING…</div>Opening the vault</div></div>`;
+      return;
+    }
+    if(searchQuery.trim()){
+      renderSearch();
+      return;
+    }
+    if(nav.view === 'imageFull'){
+      renderFullImage();
+      return;
+    }
+    let body = '';
+    if(nav.view === 'survey') body = renderSurveyView();
+    else if(nav.view === 'character') body = renderCharacterView();
+    else body = renderHome();
+
+    app.innerHTML = topbarHtml() + `<div class="content">${body}</div>` + renderFab();
+    attachGlobalHandlers();
+  }
+
+  function renderFab(){
+    if(searchQuery.trim() || nav.view==='imageFull') return '';
+    if(nav.view === 'home'){
+      return `<div class="fab"><button class="btn btn-primary btn-block" data-action="open-new-survey">+ New Survey</button></div>`;
+    }
+    if(nav.view === 'survey'){
+      return `<div class="fab"><button class="btn btn-primary btn-block" data-action="open-new-character">+ Add Character</button></div>`;
+    }
+    if(nav.view === 'character'){
+      return `<div class="fab"><label class="btn btn-primary btn-block" style="display:block;text-align:center;">+ Upload Screenshots<input type="file" accept="image/*" multiple id="fileInput" style="display:none;"></label></div>`;
+    }
+    return '';
+  }
+
+  function renderHome(){
+    const surveys = Object.values(state.surveys).sort((a,b)=>b.createdAt-a.createdAt);
+    const totalChars = Object.keys(state.characters).length;
+    const totalImgs = Object.keys(state.imagesMeta).length;
+    let html = `
+      <div class="stat-row">
+        <div class="stat"><div class="n">${surveys.length}</div><div class="l">Surveys</div></div>
+        <div class="stat"><div class="n">${totalChars}</div><div class="l">Characters</div></div>
+        <div class="stat"><div class="n">${totalImgs}</div><div class="l">Screenshots</div></div>
+      </div>`;
+    html += `<div style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn btn-ghost btn-sm" data-action="export-backup" style="flex:1;">⭳ Export Backup</button>
+        <label class="btn btn-ghost btn-sm" style="flex:1;text-align:center;">⭱ Import Backup<input type="file" accept="application/json" id="importInput" style="display:none;"></label>
+      </div>`;
+    if(surveys.length===0){
+      html += `<div class="empty"><div class="stamp">NO RECORDS YET</div>Create your first survey folder to start filing screenshots.</div>`;
+    } else {
+      html += `<div class="card-list">` + surveys.map(s=>{
+        const chars = Object.values(state.characters).filter(c=>c.surveyId===s.id);
+        const imgs = chars.reduce((n,c)=>n+Object.values(state.imagesMeta).filter(im=>im.characterId===c.id).length,0);
+        const initials = (s.name||'?').trim().slice(0,2).toUpperCase();
+        const status = s.status || 'New';
+        return `
+        <div class="survey-card" data-action="open-survey" data-id="${s.id}">
+          <div class="folder-tab">${esc(initials)}</div>
+          <div class="meta">
+            <div class="name">${esc(s.name)}</div>
+            <div class="sub">${chars.length} character${chars.length!==1?'s':''} · ${imgs} screenshot${imgs!==1?'s':''} · added ${formatDate(s.createdAt)}</div>
+          </div>
+          <span class="status-chip" style="--sc:${STATUS_COLOR[status]||'#8a95a5'}">${esc(status)}</span>
+          <div class="chev">›</div>
+        </div>`;
+      }).join('') + `</div>`;
+    }
+    return html;
+  }
+
+  function renderSurveyView(){
+    const s = state.surveys[nav.surveyId];
+    if(!s){ nav.view='home'; return renderHome(); }
+    const chars = Object.values(state.characters).filter(c=>c.surveyId===s.id).sort((a,b)=>a.createdAt-b.createdAt);
+    let html = `
+      <div class="crumb"><button data-action="go-home">Vault</button><span>/</span><span>${esc(s.name)}</span></div>
+      <h1 class="page-title">${esc(s.name)}</h1>
+      <p class="page-desc">Added ${formatDateTime(s.createdAt)}${s.link ? ` · <a class="link-out" href="${escAttr(s.link)}" target="_blank" rel="noopener">${esc(s.link)}</a>` : ''}</p>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap;">
+        <select data-action-select="survey-status" data-id="${s.id}" class="status-select">
+          ${STATUS_OPTS.map(o=>`<option value="${o}" ${((s.status||'New')===o)?'selected':''}>${o}</option>`).join('')}
+        </select>
+        <button class="btn btn-ghost btn-sm" data-action="edit-survey" data-id="${s.id}">Edit</button>
+        <button class="btn btn-danger btn-sm" data-action="delete-survey" data-id="${s.id}">Delete Survey</button>
+      </div>
+      <div class="section-label">Characters (${chars.length})</div>`;
+    if(chars.length===0){
+      html += `<div class="empty"><div class="stamp">NO CHARACTERS</div>Add a character identity to start uploading screenshots for this survey.</div>`;
+    } else {
+      html += chars.map(c=>{
+        const imgs = Object.values(state.imagesMeta).filter(im=>im.characterId===c.id);
+        const initials = (c.label||'?').trim().slice(0,2).toUpperCase();
+        const chips = FIELD_DEFS.filter(([k])=>c.fields && c.fields[k]).slice(0,4).map(([k,l])=>`<span class="field-chip"><b>${esc(l)}:</b> ${esc(c.fields[k])}</span>`).join('');
+        return `
+        <div class="char-card" data-action="open-character" data-id="${c.id}">
+          <div class="char-head">
+            <div class="id-stamp">${esc(initials)}</div>
+            <div>
+              <div class="label">${esc(c.label)}</div>
+              <div class="count">${imgs.length} screenshot${imgs.length!==1?'s':''} · added ${formatDate(c.createdAt)}</div>
+            </div>
+          </div>
+          ${chips ? `<div class="field-chip-row">${chips}</div>` : ''}
+        </div>`;
+      }).join('');
+    }
+    return html;
+  }
+
+  function renderCharacterView(){
+    const c = state.characters[nav.characterId];
+    if(!c){ nav.view='home'; return renderHome(); }
+    const s = state.surveys[c.surveyId];
+    const imgs = Object.values(state.imagesMeta).filter(im=>im.characterId===c.id).sort((a,b)=>b.createdAt-a.createdAt);
+    const pendingCount = imgs.filter(i=>i.status==='pending').length;
+
+    let html = `
+      <div class="crumb"><button data-action="go-home">Vault</button><span>/</span><button data-action="open-survey" data-id="${s.id}">${esc(s.name)}</button><span>/</span><span>${esc(c.label)}</span></div>
+      <h1 class="page-title">${esc(c.label)}</h1>
+      <p class="page-desc">Added ${formatDateTime(c.createdAt)}</p>
+      <div style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn btn-ghost btn-sm" data-action="rename-character" data-id="${c.id}">Rename</button>
+        <button class="btn btn-danger btn-sm" data-action="delete-character" data-id="${c.id}">Delete Character</button>
+      </div>`;
+
+    if(pendingCount>0){
+      html += `<div class="ocr-progress"><div class="spinner"></div> Reading ${pendingCount} screenshot${pendingCount!==1?'s':''}…</div>`;
+    }
+
+    html += `<div class="section-label">Extracted Details</div>
+      <div class="id-card">
+        <div class="row"><span></span><span class="stamp-big">ID CARD</span></div>
+        <div class="grid">
+          ${FIELD_DEFS.map(([k,l])=>`
+            <div class="fld ${k==='name'||k==='email'?'wide':''}">
+              <label>${esc(l)}</label>
+              <input type="text" data-field="${k}" data-char="${c.id}" value="${escAttr(c.fields && c.fields[k] || '')}" placeholder="—" />
+            </div>`).join('')}
+        </div>
+      </div>`;
+
+    html += `<div class="section-label">Screenshots (${imgs.length})</div>`;
+    if(imgs.length===0){
+      html += `<div class="empty"><div class="stamp">NO SCREENSHOTS</div>Upload screenshots below — text will be scanned automatically.</div>`;
+    } else {
+      html += `<div class="img-grid">` + imgs.map(im=>{
+        const cached = state.imageDataCache[im.id];
+        return `
+        <div class="img-thumb" data-action="open-image" data-id="${im.id}">
+          ${cached ? `<img src="${cached}" loading="lazy"/>` : `<img data-lazy="${im.id}" loading="lazy"/>`}
+          <div class="badge date-badge">${formatShort(im.createdAt)}</div>
+          <div class="badge ${im.status}">${im.status==='pending'?'scanning…':im.status==='error'?'error':'read'}</div>
+        </div>`;
+      }).join('') + `</div>`;
+    }
+    return html;
+  }
+
+  function renderSearch(){
+    const results = runSearch(searchQuery);
+    let html = topbarHtml() + `<div class="content">
+      <div class="result-count">${results.length} match${results.length!==1?'es':''} for "${esc(searchQuery.trim())}"</div>`;
+    if(results.length===0){
+      html += `<div class="empty"><div class="stamp">NO MATCHES</div>Try a different word, or wait for pending screenshots to finish scanning.</div>`;
+    } else {
+      html += `<div class="search-results">` + results.map(r=>{
+        const cached = state.imageDataCache[r.imgId];
+        const svName = r.sv ? esc(r.sv.name) : 'Unknown survey';
+        const chLabel = r.ch ? esc(r.ch.label) : 'Unknown';
+        const q = searchQuery.trim();
+        const reg = new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig');
+        const snippetHl = esc(r.snippet).replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig'), '<mark>$1</mark>');
+        return `
+        <div class="result" data-action="open-search-result" data-id="${r.imgId}" data-char="${r.characterId}">
+          ${cached ? `<img src="${cached}"/>` : `<img data-lazy="${r.imgId}"/>`}
+          <div class="rmeta">
+            <div class="path">${svName} › ${chLabel}</div>
+            <div class="snippet">${snippetHl}</div>
+          </div>
+        </div>`;
+      }).join('') + `</div>`;
+    }
+    html += `</div>`;
+    app.innerHTML = html;
+    attachGlobalHandlers();
+    lazyLoadVisible();
+  }
+
+  function renderFullImage(){
+    const meta = state.imagesMeta[nav.imageId];
+    if(!meta){ nav.view='character'; render(); return; }
+    const ch = state.characters[meta.characterId];
+    const sv = ch ? state.surveys[ch.surveyId] : null;
+    app.innerHTML = `
+      <div class="full-view">
+        <div class="fv-top">
+          <button data-action="close-full">← Back</button>
+          <button data-action="delete-image-full" data-id="${meta.id}" style="margin-left:auto;">Delete</button>
+        </div>
+        <div class="fv-stage">
+          <div class="fv-imgwrap" id="fvImgWrap">
+            <img id="fvImg" />
+          </div>
+        </div>
+        <div class="fv-status">
+          <span>${sv?esc(sv.name):''} ${ch?'› '+esc(ch.label):''} · uploaded ${formatDateTime(meta.createdAt)}</span>
+          <span>${meta.status==='pending'?'scanning…':meta.status==='error'?'scan failed':'text indexed'}</span>
+        </div>
+      </div>`;
+    document.querySelector('[data-action="close-full"]').onclick = ()=>{ nav.view='character'; render(); };
+    document.querySelector('[data-action="delete-image-full"]').onclick = async (e)=>{
+      const id = e.currentTarget.getAttribute('data-id');
+      await deleteImage(id);
+      nav.view='character'; render();
+    };
+    getImageData(meta.id).then(dataUrl=>{
+      const img = document.getElementById('fvImg');
+      if(!dataUrl) return;
+      img.src = dataUrl;
+      img.onload = ()=>{
+        if(!nav.highlightQ || !meta.words || !meta.words.length) return;
+        const q = nav.highlightQ.toLowerCase();
+        const wrap = document.getElementById('fvImgWrap');
+        const scaleX = img.clientWidth / img.naturalWidth;
+        const scaleY = img.clientHeight / img.naturalHeight;
+        meta.words.forEach(w=>{
+          if(w.t.toLowerCase().replace(/[^a-z0-9]/gi,'').indexOf(q.replace(/[^a-z0-9]/gi,'')) === -1) return;
+          const box = document.createElement('div');
+          box.className = 'hl-box';
+          box.style.left = (w.x0*scaleX)+'px';
+          box.style.top = (w.y0*scaleY)+'px';
+          box.style.width = ((w.x1-w.x0)*scaleX)+'px';
+          box.style.height = ((w.y1-w.y0)*scaleY)+'px';
+          wrap.appendChild(box);
+        });
+      };
+    });
+  }
+
+  function lazyLoadVisible(){
+    document.querySelectorAll('img[data-lazy]').forEach(async img=>{
+      const id = img.getAttribute('data-lazy');
+      const dataUrl = await getImageData(id);
+      if(dataUrl) img.src = dataUrl;
+    });
+  }
+
+  // ---------- modals ----------
+  function openModal(html){
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    wrap.innerHTML = `<div class="modal">${html}</div>`;
+    wrap.addEventListener('click', (e)=>{ if(e.target===wrap) wrap.remove(); });
+    document.body.appendChild(wrap);
+    return wrap;
+  }
+
+  function newSurveyModal(){
+    const m = openModal(`
+      <h2>New Survey</h2>
+      <div class="field-group"><label>Survey Name</label><input id="mSName" type="text" placeholder="e.g. XYZ Rewards Survey" /></div>
+      <div class="field-group"><label>Survey Link (optional)</label><input id="mSLink" type="text" placeholder="https://…" /></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" id="mSCreate">Create</button>
+      </div>`);
+    m.querySelector('[data-close]').onclick = ()=>m.remove();
+    m.querySelector('#mSCreate').onclick = async ()=>{
+      const name = m.querySelector('#mSName').value.trim();
+      if(!name){ showToast('Give the survey a name'); return; }
+      const link = m.querySelector('#mSLink').value.trim();
+      const id = await createSurvey(name, link);
+      m.remove();
+      nav = { view:'survey', surveyId:id, characterId:null, imageId:null };
+      render();
+    };
+    m.querySelector('#mSName').focus();
+  }
+
+  function editSurveyModal(id){
+    const s = state.surveys[id];
+    const m = openModal(`
+      <h2>Edit Survey</h2>
+      <div class="field-group"><label>Survey Name</label><input id="mSName" type="text" value="${escAttr(s.name)}" /></div>
+      <div class="field-group"><label>Survey Link</label><input id="mSLink" type="text" value="${escAttr(s.link||'')}" /></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" id="mSSave">Save</button>
+      </div>`);
+    m.querySelector('[data-close]').onclick = ()=>m.remove();
+    m.querySelector('#mSSave').onclick = async ()=>{
+      const name = m.querySelector('#mSName').value.trim();
+      const link = m.querySelector('#mSLink').value.trim();
+      if(!name){ showToast('Name cannot be empty'); return; }
+      await updateSurvey(id, name, link, s.status);
+      m.remove(); render();
+    };
+  }
+
+  function newCharacterModal(surveyId){
+    const m = openModal(`
+      <h2>Add Character</h2>
+      <p class="page-desc">Give this instance of the survey an identifying label — e.g. a persona name or "Attempt 2".</p>
+      <div class="field-group"><label>Label</label><input id="mCLabel" type="text" placeholder="e.g. John Doe / Character A" /></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" id="mCCreate">Create</button>
+      </div>`);
+    m.querySelector('[data-close]').onclick = ()=>m.remove();
+    m.querySelector('#mCCreate').onclick = async ()=>{
+      const label = m.querySelector('#mCLabel').value.trim();
+      const id = await createCharacter(surveyId, label || ('Character '+(Object.values(state.characters).filter(c=>c.surveyId===surveyId).length+1)));
+      m.remove();
+      nav = { view:'character', surveyId, characterId:id, imageId:null };
+      render();
+    };
+    m.querySelector('#mCLabel').focus();
+  }
+
+  function renameCharacterModal(id){
+    const c = state.characters[id];
+    const m = openModal(`
+      <h2>Rename Character</h2>
+      <div class="field-group"><label>Label</label><input id="mCLabel" type="text" value="${escAttr(c.label)}" /></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-primary" id="mCSave">Save</button>
+      </div>`);
+    m.querySelector('[data-close]').onclick = ()=>m.remove();
+    m.querySelector('#mCSave').onclick = async ()=>{
+      const label = m.querySelector('#mCLabel').value.trim();
+      if(!label){ showToast('Label cannot be empty'); return; }
+      await updateCharacterLabel(id, label);
+      m.remove(); render();
+    };
+  }
+
+  function confirmModal(title, desc, onConfirm){
+    const m = openModal(`
+      <h2>${esc(title)}</h2>
+      <p class="page-desc">${esc(desc)}</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" data-close>Cancel</button>
+        <button class="btn btn-danger" id="mConfirm">Delete</button>
+      </div>`);
+    m.querySelector('[data-close]').onclick = ()=>m.remove();
+    m.querySelector('#mConfirm').onclick = async ()=>{
+      m.remove();
+      await onConfirm();
+    };
+  }
+
+  // ---------- event wiring ----------
+  function attachGlobalHandlers(){
+    const searchInput = document.getElementById('searchInput');
+    if(searchInput){
+      searchInput.oninput = (e)=>{ searchQuery = e.target.value; render(); const el=document.getElementById('searchInput'); if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length);} };
+    }
+    document.querySelectorAll('[data-action]').forEach(el=>{
+      el.addEventListener('click', onAction);
+    });
+    document.querySelectorAll('input[data-field]').forEach(el=>{
+      el.addEventListener('change', async (e)=>{
+        await updateCharacterField(e.target.getAttribute('data-char'), e.target.getAttribute('data-field'), e.target.value);
+      });
+    });
+    const fileInput = document.getElementById('fileInput');
+    if(fileInput){
+      fileInput.addEventListener('change', (e)=>{
+        if(e.target.files.length) handleFiles(nav.characterId, e.target.files);
+        e.target.value = '';
+      });
+    }
+    const importInput = document.getElementById('importInput');
+    if(importInput){
+      importInput.addEventListener('change', (e)=>{
+        if(e.target.files.length) importBackup(e.target.files[0]);
+        e.target.value = '';
+      });
+    }
+    document.querySelectorAll('[data-action-select="survey-status"]').forEach(sel=>{
+      sel.addEventListener('change', async (e)=>{
+        const id = e.target.getAttribute('data-id');
+        const s = state.surveys[id];
+        await updateSurvey(id, s.name, s.link, e.target.value);
+        render();
+      });
+    });
+    lazyLoadVisible();
+  }
+
+  function onAction(e){
+    const el = e.currentTarget;
+    const action = el.getAttribute('data-action');
+    const id = el.getAttribute('data-id');
+    switch(action){
+      case 'clear-search': searchQuery=''; render(); break;
+      case 'open-new-survey': newSurveyModal(); break;
+      case 'open-survey': nav = { view:'survey', surveyId:id, characterId:null, imageId:null }; render(); break;
+      case 'edit-survey': editSurveyModal(id); break;
+      case 'delete-survey': confirmModal('Delete Survey', 'This removes the survey and all its characters and screenshots.', async ()=>{ await deleteSurvey(id); nav={view:'home'}; render(); }); break;
+      case 'open-new-character': newCharacterModal(nav.surveyId); break;
+      case 'open-character': nav = { view:'character', surveyId: state.characters[id].surveyId, characterId:id, imageId:null }; render(); break;
+      case 'rename-character': renameCharacterModal(id); break;
+      case 'delete-character': confirmModal('Delete Character', 'This removes the character and all its screenshots.', async ()=>{ const sid=state.characters[id].surveyId; await deleteCharacter(id); nav={view:'survey', surveyId:sid}; render(); }); break;
+      case 'open-image': nav.view='imageFull'; nav.imageId=id; nav.highlightQ=null; render(); break;
+      case 'open-search-result': {
+        const im = state.imagesMeta[id];
+        nav = { view:'imageFull', surveyId: state.characters[im.characterId] ? state.characters[im.characterId].surveyId : null, characterId: im.characterId, imageId:id, highlightQ: searchQuery.trim() };
+        searchQuery='';
+        render();
+        break;
+      }
+      case 'go-home': searchQuery=''; nav={view:'home'}; render(); break;
+      case 'export-backup': exportBackup(); break;
+    }
+  }
+
+  // ---------- init ----------
+  (async function init(){
+    render();
+    await loadAll();
+    render();
+  })();
+
+})();
+</script>
+</body>
+</html>
